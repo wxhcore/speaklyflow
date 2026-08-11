@@ -1,0 +1,17 @@
+# 清华大学 PyPI 镜像
+--index-url https://pypi.tuna.tsinghua.edu.cn/simple
+--trusted-host pypi.tuna.tsinghua.edu.cn
+
+# LocalAudio
+sounddevice>=0.5.3,<0.6
+
+# Silero VAD
+numpy>=1.26.4,<3
+onnxruntime>=1.20,<2
+
+# 测试与代码检查
+pyright>=1.1.400,<2
+pytest>=8,<10
+pytest-asyncio>=0.24,<2
+pytest-cov>=6,<8
+ruff>=0.12,<1
