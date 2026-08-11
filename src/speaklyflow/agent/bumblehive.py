@@ -1,6 +1,6 @@
 """Bumblehive runtime integration."""
 
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncIterator
 from dataclasses import replace
 from typing import Self
 
@@ -8,7 +8,7 @@ import bumblehive
 from bumblehive.agent import AgentRunResult
 from bumblehive.config import ConfigInput
 from bumblehive.observability import AgentEvent, AsyncEventStream
-from bumblehive.tools import Tool
+from bumblehive.tools import ToolManager
 
 
 class AgentTurn:
@@ -40,15 +40,14 @@ class AgentTurn:
 class BumblehiveAgent:
     """Create streamed Bumblehive turns without committing history early."""
 
-    def __init__(
-        self,
-        config: ConfigInput = None,
-        *,
-        tools: Iterable[Tool] = (),
-    ) -> None:
+    def __init__(self, config: ConfigInput = None) -> None:
         self._runtime = bumblehive.from_config(config)
-        for tool in tools:
-            self._runtime.tools.register(tool)
+
+    @property
+    def tools(self) -> ToolManager:
+        """Return the Bumblehive tool manager."""
+
+        return self._runtime.tools
 
     async def __aenter__(self) -> Self:
         await self.start()
