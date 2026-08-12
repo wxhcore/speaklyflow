@@ -23,7 +23,7 @@ class AudioIO(Protocol):
 
     @property
     def played_frames(self) -> int:
-        """Number of output frames accepted by the playback device."""
+        """Number of output frames confirmed by the playback backend."""
 
         ...
 
@@ -39,6 +39,11 @@ class AudioIO(Protocol):
 
     async def write(self, chunk: AudioChunk) -> None:
         """Write a chunk to the output device."""
+
+        ...
+
+    async def wait_for_playback(self) -> None:
+        """Wait until all previously written audio has played."""
 
         ...
 

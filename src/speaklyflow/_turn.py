@@ -325,6 +325,7 @@ class _TurnRunner:
         result = await speech.result()
         if not result.completed:
             raise RuntimeError("TTS synthesis did not complete")
+        await self._audio.wait_for_playback()
 
     async def _speech_text(self) -> AsyncIterator[str]:
         segmenter = TextSegmenter()
