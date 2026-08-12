@@ -7,7 +7,7 @@ from ..vad import VADState
 class SpeechSegmenter:
     """Collect continuous PCM chunks into VAD-delimited speech segments."""
 
-    def __init__(self, *, pre_roll_ms: int = 200) -> None:
+    def __init__(self, *, pre_roll_ms: int = 500) -> None:
         """Configure how much audio to retain before speech is detected."""
 
         if pre_roll_ms < 0:
