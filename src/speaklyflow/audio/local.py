@@ -73,6 +73,7 @@ class LocalAudio:
         self._closed = False
         self._capture_active = False
         self._playback_generation = 0
+        self._played_frames = 0
 
     @property
     def input_format(self) -> AudioFormat:
@@ -85,6 +86,12 @@ class LocalAudio:
         """Format required for playback chunks."""
 
         return self._output_format
+
+    @property
+    def played_frames(self) -> int:
+        """Number of output frames written to the current playback device."""
+
+        return self._played_frames
 
     async def start(self) -> None:
         """Open and start the configured microphone and speaker."""
@@ -213,6 +220,7 @@ class LocalAudio:
                 await asyncio.to_thread(stream.write, data)
             except Exception as error:
                 raise AudioDeviceError(f"Unable to play local audio: {error}") from error
+            self._played_frames += self._output_format.frame_count(data)
 
     def _initialize_capture_queue(self) -> None:
         self._loop = asyncio.get_running_loop()

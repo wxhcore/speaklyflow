@@ -1,26 +1,22 @@
 """Run a local voice conversation from microphone input to speech output."""
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable
 
 import bumblehive
-from bumblehive.observability import (
-    MODEL_STREAM_CONTENT_DELTA,
-    MODEL_STREAM_REFUSAL_DELTA,
-)
 
-from .agent import AgentTurn, BumblehiveAgent
+from ._turn import _TurnRunner
+from .agent import BumblehiveAgent
 from .asr import ASR, SpeechSegmenter
 from .audio import AudioChunk, AudioFormatError, AudioIO
-from .tts import TTS, TextSegmenter, TTSStream
-from .vad import VAD
+from .tts import TTS
+from .vad import VAD, VADState
 
-_TEXT_EVENTS = (MODEL_STREAM_CONTENT_DELTA, MODEL_STREAM_REFUSAL_DELTA)
 _Close = Callable[[], Awaitable[None]]
 
 
 class VoiceSession:
-    """Run continuous non-interruptible voice turns with managed resources."""
+    """Run continuous interruptible voice turns with managed resources."""
 
     def __init__(
         self,
@@ -49,14 +45,15 @@ class VoiceSession:
 
         self._segmenter = SpeechSegmenter()
         self._segments: asyncio.Queue[AudioChunk] = asyncio.Queue(maxsize=1)
-        self._listening = asyncio.Event()
         self._capture_task: asyncio.Task[None] | None = None
+        self._active_turn: _TurnRunner | None = None
+        self._turn_id = 0
         self._started_closers: list[_Close] = []
         self._used = False
 
     @property
     def history(self) -> bumblehive.MessageHistory:
-        """Conversation history committed by completed turns."""
+        """Conversation history committed by completed and interrupted turns."""
 
         return self._history
 
@@ -69,7 +66,6 @@ class VoiceSession:
 
         try:
             await self._start_components()
-            self._listening.set()
             self._capture_task = asyncio.create_task(
                 self._capture(),
                 name="speaklyflow-audio-capture",
@@ -88,19 +84,19 @@ class VoiceSession:
             if transcript.text:
                 await self._run_turn(transcript.text)
 
-            self._segmenter.reset()
-            self._listening.set()
-
     async def _capture(self) -> None:
+        previous = VADState.SILENCE
         async for chunk in self._audio.capture():
-            if not self._listening.is_set():
-                continue
-
             state = await self._vad.analyze(chunk)
+            if state is VADState.SPEAKING and previous is VADState.SILENCE:
+                active_turn = self._active_turn
+                if active_turn is not None:
+                    active_turn.interrupt()
+
             segment = self._segmenter.push(chunk, state)
             if segment is not None:
-                self._listening.clear()
                 await self._segments.put(segment)
+            previous = state
 
     async def _next_segment(self) -> AudioChunk:
         capture_task = self._capture_task
@@ -126,45 +122,48 @@ class VoiceSession:
                 await asyncio.gather(receive, return_exceptions=True)
 
     async def _run_turn(self, prompt: str) -> None:
-        turn = self._agent.stream(prompt, history=self._history)
-        try:
-            speech = self._tts.synthesize(self._response_text(turn))
-        except BaseException:
-            await self._close_turn(turn, suppress_errors=True)
-            raise
+        self._turn_id += 1
+        turn_id = self._turn_id
+        runner = _TurnRunner(
+            prompt=prompt,
+            history=self._history,
+            audio=self._audio,
+            agent=self._agent,
+            tts=self._tts,
+        )
+        self._active_turn = runner
+        task = asyncio.create_task(
+            runner.run(),
+            name=f"speaklyflow-turn-{turn_id}",
+        )
+        capture_task = self._capture_task
+        if capture_task is None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise RuntimeError("VoiceSession audio capture is not running")
 
         try:
-            async for chunk in speech:
-                await self._audio.write(chunk)
+            done, _ = await asyncio.wait(
+                {task, capture_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if capture_task in done:
+                await capture_task
+                raise RuntimeError("Audio capture stopped unexpectedly")
 
-            tts_result = await speech.result()
-            if not tts_result.completed:
-                raise RuntimeError("TTS synthesis did not complete")
-
-            agent_result = await turn.result()
-            self._history.replace(agent_result.messages)
-        except BaseException:
-            await self._close_turn(turn, speech, suppress_errors=True)
-            raise
-        else:
-            await self._close_turn(turn, speech, suppress_errors=False)
-
-    async def _response_text(self, turn: AgentTurn) -> AsyncIterator[str]:
-        segmenter = TextSegmenter()
-
-        async for event in turn:
-            if event.kind not in _TEXT_EVENTS:
-                continue
-
-            delta = event.payload.get("delta")
-            if not isinstance(delta, str):
-                continue
-            for text in segmenter.push(delta):
-                yield text
-
-        remaining = segmenter.flush()
-        if remaining:
-            yield remaining
+            outcome = await task
+            if self._turn_id != turn_id:
+                return
+            if outcome.interrupted:
+                self._history.extend(outcome.messages)
+            else:
+                self._history.replace(outcome.messages)
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            if self._active_turn is runner:
+                self._active_turn = None
 
     async def _start_components(self) -> None:
         try:
@@ -187,7 +186,6 @@ class VoiceSession:
             raise
 
     async def _shutdown(self, *, suppress_errors: bool) -> None:
-        self._listening.clear()
         capture_task = self._capture_task
         self._capture_task = None
         if capture_task is not None:
@@ -201,19 +199,6 @@ class VoiceSession:
         closers = tuple(reversed(self._started_closers))
         self._started_closers.clear()
         await self._close_all(closers, suppress_errors=suppress_errors)
-
-    @staticmethod
-    async def _close_turn(
-        turn: AgentTurn,
-        speech: TTSStream | None = None,
-        *,
-        suppress_errors: bool,
-    ) -> None:
-        closers: list[_Close] = []
-        if speech is not None:
-            closers.append(speech.aclose)
-        closers.append(turn.aclose)
-        await VoiceSession._close_all(closers, suppress_errors=suppress_errors)
 
     @staticmethod
     async def _close_all(

@@ -26,8 +26,8 @@ from ._vendor.volcengine import (
     task_request,
 )
 from .errors import TTSError, TTSStateError
-from .protocols import TextInput, TTSStream
-from .types import TTSResult
+from .protocols import TextInput, TTSOutput, TTSStream
+from .types import TTSResult, TTSTextMark
 
 _URL = "wss://openspeech.bytedance.com/api/v3/tts/bidirection"
 _MAX_MESSAGE_SIZE = 10 * 1024 * 1024
@@ -57,16 +57,28 @@ class _SynthesisState:
         )
 
 
-class _SynthesisStream(AsyncIterator[AudioChunk]):
+@dataclass(frozen=True, slots=True)
+class _SubtitleWord:
+    text: str
+    start_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class _Subtitle:
+    text: str
+    words: tuple[_SubtitleWord, ...]
+
+
+class _SynthesisStream(AsyncIterator[TTSOutput]):
     """Deliver one provider-owned synthesis task to an audio consumer."""
 
     def __init__(self, tts: "VolcengineTTS", text: TextInput) -> None:
         loop = asyncio.get_running_loop()
         self._tts = tts
-        self._audio: asyncio.Queue[AudioChunk] = asyncio.Queue(maxsize=1)
+        self._output: asyncio.Queue[TTSOutput] = asyncio.Queue(maxsize=1)
         self._state = _SynthesisState()
         self._task = loop.create_task(
-            tts._run_synthesis(text, self._audio, self._state),
+            tts._run_synthesis(text, self._output, self._state),
             name="volcengine-tts-session",
         )
         self._closed = False
@@ -74,14 +86,14 @@ class _SynthesisStream(AsyncIterator[AudioChunk]):
     def __aiter__(self) -> Self:
         return self
 
-    async def __anext__(self) -> AudioChunk:
+    async def __anext__(self) -> TTSOutput:
         if self._closed:
             raise StopAsyncIteration
-        if self._task.done() and self._audio.empty():
+        if self._task.done() and self._output.empty():
             await self._finish()
             raise StopAsyncIteration
 
-        receive = asyncio.create_task(self._audio.get(), name="volcengine-tts-output")
+        receive = asyncio.create_task(self._output.get(), name="volcengine-tts-output")
         try:
             done, _ = await asyncio.wait(
                 {receive, self._task},
@@ -94,8 +106,8 @@ class _SynthesisStream(AsyncIterator[AudioChunk]):
             await asyncio.gather(receive, return_exceptions=True)
             if self._closed:
                 raise StopAsyncIteration
-            if not self._audio.empty():
-                return self._audio.get_nowait()
+            if not self._output.empty():
+                return self._output.get_nowait()
 
             await self._finish()
             raise StopAsyncIteration
@@ -137,7 +149,7 @@ class _SynthesisStream(AsyncIterator[AudioChunk]):
 
 
 class VolcengineTTS:
-    """Stream signed 16-bit mono PCM audio from Volcengine TTS."""
+    """Stream PCM audio and word-aligned playback marks from Volcengine TTS."""
 
     def __init__(
         self,
@@ -195,7 +207,7 @@ class VolcengineTTS:
             self._started = True
 
     def synthesize(self, text: TextInput) -> TTSStream:
-        """Send text chunks and stream audio from one provider session."""
+        """Send text chunks and stream synthesis output from one provider session."""
 
         self._ensure_started()
         if self._stream is not None:
@@ -208,13 +220,16 @@ class VolcengineTTS:
     async def _run_synthesis(
         self,
         text: TextInput,
-        output: asyncio.Queue[AudioChunk],
+        output: asyncio.Queue[TTSOutput],
         state: _SynthesisState,
     ) -> None:
         session_id: str | None = None
         sender: asyncio.Task[None] | None = None
         receiver: asyncio.Task[Message] | None = None
         audio = bytearray()
+        sentence_text = ""
+        marked_text = ""
+        seen_marks: set[TTSTextMark] = set()
 
         try:
             session_id = await self._open_session()
@@ -253,7 +268,30 @@ class VolcengineTTS:
                             chunk = bytes(audio[:aligned_length])
                             del audio[:aligned_length]
                             await output.put(AudioChunk(chunk, self._output_format))
+                elif message.event == EventType.TTSSentenceStart:
+                    sentence_text = ""
+                elif message.event == EventType.TTSSentenceEnd:
+                    sentence_text = self._parse_event_text(message.payload)
+                elif message.event == EventType.TTSSubtitle:
+                    subtitle = self._parse_subtitle(message.payload)
+                    if subtitle is not None:
+                        for mark in self._subtitle_marks(subtitle):
+                            if mark in seen_marks:
+                                continue
+                            seen_marks.add(mark)
+                            marked_text += mark.text
+                            await output.put(mark)
                 elif message.event == EventType.SessionFinished:
+                    fallback = sentence_text[len(marked_text) :]
+                    if sentence_text.startswith(marked_text) and fallback:
+                        await output.put(
+                            TTSTextMark(
+                                text=fallback,
+                                at_frame=(
+                                    state.audio_bytes // self._output_format.frame_bytes
+                                ),
+                            )
+                        )
                     await sender
                     state.provider_usage = self._parse_usage(message.payload)
                     state.completed = True
@@ -503,8 +541,85 @@ class VolcengineTTS:
             "audio_params": {
                 "format": "pcm",
                 "sample_rate": self._output_format.sample_rate,
+                "enable_subtitle": True,
             },
         }
+
+    @staticmethod
+    def _parse_event_text(payload: bytes) -> str:
+        try:
+            value = json.loads(payload)
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+            return ""
+        if not isinstance(value, dict):
+            return ""
+        text = value.get("text")
+        return text if isinstance(text, str) else ""
+
+    @staticmethod
+    def _parse_subtitle(payload: bytes) -> _Subtitle | None:
+        try:
+            value = json.loads(payload)
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+            return None
+        if not isinstance(value, dict):
+            return None
+
+        text = value.get("text")
+        raw_words = value.get("words")
+        if not isinstance(text, str) or not text or not isinstance(raw_words, list):
+            return None
+
+        words: list[_SubtitleWord] = []
+        for raw_word in raw_words:
+            if not isinstance(raw_word, dict):
+                return None
+            word = raw_word.get("word")
+            start = raw_word.get("startTime")
+            if (
+                not isinstance(word, str)
+                or not word
+                or not isinstance(start, (int, float))
+                or isinstance(start, bool)
+                or start < 0
+            ):
+                return None
+            words.append(_SubtitleWord(word, float(start)))
+
+        return _Subtitle(text, tuple(words))
+
+    def _subtitle_marks(
+        self,
+        subtitle: _Subtitle,
+    ) -> list[TTSTextMark]:
+        if not subtitle.words:
+            return []
+
+        marks: list[TTSTextMark] = []
+        cursor = 0
+        for word in subtitle.words:
+            index = subtitle.text.find(word.text, cursor)
+            if index < 0:
+                return []
+            text = subtitle.text[cursor : index + len(word.text)]
+            if text:
+                marks.append(
+                    TTSTextMark(
+                        text=text,
+                        at_frame=round(
+                            word.start_seconds * self._output_format.sample_rate
+                        ),
+                    )
+                )
+            cursor = index + len(word.text)
+
+        remaining = subtitle.text[cursor:]
+        if remaining:
+            marks[-1] = TTSTextMark(
+                text=marks[-1].text + remaining,
+                at_frame=marks[-1].at_frame,
+            )
+        return marks
 
     @staticmethod
     async def _text_parts(text: TextInput) -> AsyncIterator[str]:

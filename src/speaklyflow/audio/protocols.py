@@ -21,6 +21,12 @@ class AudioIO(Protocol):
 
         ...
 
+    @property
+    def played_frames(self) -> int:
+        """Number of output frames accepted by the playback device."""
+
+        ...
+
     async def start(self) -> None:
         """Open input and output resources."""
 

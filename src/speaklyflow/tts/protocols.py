@@ -4,17 +4,23 @@ from collections.abc import AsyncIterable
 from typing import Protocol, Self, TypeAlias
 
 from ..audio import AudioChunk, AudioFormat
-from .types import TTSResult
+from .types import TTSResult, TTSTextMark
 
 TextInput: TypeAlias = str | AsyncIterable[str]
+TTSOutput: TypeAlias = AudioChunk | TTSTextMark
 
 
 class TTSStream(Protocol):
-    """Audio iterator with explicit cancellation and final results."""
+    """Synthesis output iterator with cancellation and final results.
+
+    Timestamp-capable providers emit word-level ``TTSTextMark`` values. Other
+    providers emit a mark after each complete text segment, or omit marks when
+    playback alignment cannot be established reliably.
+    """
 
     def __aiter__(self) -> Self: ...
 
-    async def __anext__(self) -> AudioChunk: ...
+    async def __anext__(self) -> TTSOutput: ...
 
     async def aclose(self) -> None:
         """Cancel synthesis and release its resources."""
@@ -42,7 +48,7 @@ class TTS(Protocol):
         ...
 
     def synthesize(self, text: TextInput) -> TTSStream:
-        """Stream audio for text chunks."""
+        """Stream audio and playback-alignment marks for text chunks."""
 
         ...
 
