@@ -9,6 +9,12 @@ from .types import VADState
 class VAD(Protocol):
     """Provider-neutral streaming voice activity detector."""
 
+    @property
+    def speech_end_confirmation_seconds(self) -> float:
+        """Silence required before reporting that speech has ended."""
+
+        ...
+
     async def start(self, input_format: AudioFormat) -> None:
         """Initialize the detector for an input audio format."""
 

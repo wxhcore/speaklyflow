@@ -48,6 +48,12 @@ class SileroVAD:
         self._started = False
         self._closed = False
 
+    @property
+    def speech_end_confirmation_seconds(self) -> float:
+        """Silence required before Silero reports the end of speech."""
+
+        return self._speech_end_seconds
+
     async def start(self, input_format: AudioFormat) -> None:
         """Load the detector and validate the input format."""
 

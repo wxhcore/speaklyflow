@@ -1,4 +1,4 @@
-"""Speakly Flow voice agent SDK."""
+"""Voice session runtime."""
 
 from .session import VoiceSession
 
