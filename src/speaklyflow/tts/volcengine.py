@@ -61,6 +61,7 @@ class _SynthesisState:
 class _SubtitleWord:
     text: str
     start_seconds: float
+    end_seconds: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,8 +228,10 @@ class VolcengineTTS:
         sender: asyncio.Task[None] | None = None
         receiver: asyncio.Task[Message] | None = None
         audio = bytearray()
-        sentence_text = ""
-        marked_text = ""
+        sentence_audio_start_frame = 0
+        sentence_start_seen = False
+        subtitle_seen = False
+        sentence_fallbacks: list[TTSTextMark] = []
         seen_marks: set[TTSTextMark] = set()
 
         try:
@@ -269,29 +272,45 @@ class VolcengineTTS:
                             del audio[:aligned_length]
                             await output.put(AudioChunk(chunk, self._output_format))
                 elif message.event == EventType.TTSSentenceStart:
-                    sentence_text = ""
+                    sentence_audio_start_frame = (
+                        state.audio_bytes // self._output_format.frame_bytes
+                    )
+                    sentence_start_seen = True
                 elif message.event == EventType.TTSSentenceEnd:
                     sentence_text = self._parse_event_text(message.payload)
-                elif message.event == EventType.TTSSubtitle:
-                    subtitle = self._parse_subtitle(message.payload)
-                    if subtitle is not None:
-                        for mark in self._subtitle_marks(subtitle):
-                            if mark in seen_marks:
-                                continue
-                            seen_marks.add(mark)
-                            marked_text += mark.text
-                            await output.put(mark)
-                elif message.event == EventType.SessionFinished:
-                    fallback = sentence_text[len(marked_text) :]
-                    if sentence_text.startswith(marked_text) and fallback:
-                        await output.put(
+                    if sentence_text:
+                        sentence_fallbacks.append(
                             TTSTextMark(
-                                text=fallback,
+                                text=sentence_text,
                                 at_frame=(
                                     state.audio_bytes // self._output_format.frame_bytes
                                 ),
                             )
                         )
+                elif message.event == EventType.TTSSubtitle:
+                    subtitle = self._parse_subtitle(message.payload)
+                    if subtitle is not None:
+                        subtitle_seen = True
+                        audio_start_frame = self._subtitle_audio_start_frame(
+                            subtitle,
+                            sentence_audio_start_frame=sentence_audio_start_frame,
+                            sentence_start_seen=sentence_start_seen,
+                            received_frames=(
+                                state.audio_bytes // self._output_format.frame_bytes
+                            ),
+                        )
+                        for mark in self._subtitle_marks(
+                            subtitle,
+                            audio_start_frame=audio_start_frame,
+                        ):
+                            if mark in seen_marks:
+                                continue
+                            seen_marks.add(mark)
+                            await output.put(mark)
+                elif message.event == EventType.SessionFinished:
+                    if not subtitle_seen:
+                        for fallback in sentence_fallbacks:
+                            await output.put(fallback)
                     await sender
                     state.provider_usage = self._parse_usage(message.payload)
                     state.completed = True
@@ -576,21 +595,27 @@ class VolcengineTTS:
                 return None
             word = raw_word.get("word")
             start = raw_word.get("startTime")
+            end = raw_word.get("endTime")
             if (
                 not isinstance(word, str)
                 or not word
                 or not isinstance(start, (int, float))
                 or isinstance(start, bool)
+                or not isinstance(end, (int, float))
+                or isinstance(end, bool)
                 or start < 0
+                or end < start
             ):
                 return None
-            words.append(_SubtitleWord(word, float(start)))
+            words.append(_SubtitleWord(word, float(start), float(end)))
 
         return _Subtitle(text, tuple(words))
 
     def _subtitle_marks(
         self,
         subtitle: _Subtitle,
+        *,
+        audio_start_frame: int = 0,
     ) -> list[TTSTextMark]:
         if not subtitle.words:
             return []
@@ -601,13 +626,21 @@ class VolcengineTTS:
             index = subtitle.text.find(word.text, cursor)
             if index < 0:
                 return []
-            text = subtitle.text[cursor : index + len(word.text)]
-            if text:
+            prefix = subtitle.text[cursor:index]
+            duration = max(word.end_seconds - word.start_seconds, 0.0)
+            for character_index, character in enumerate(word.text):
                 marks.append(
                     TTSTextMark(
-                        text=text,
-                        at_frame=round(
-                            word.start_seconds * self._output_format.sample_rate
+                        text=(prefix if character_index == 0 else "") + character,
+                        at_frame=(
+                            audio_start_frame
+                            + round(
+                                (
+                                    word.start_seconds
+                                    + duration * character_index / len(word.text)
+                                )
+                                * self._output_format.sample_rate
+                            )
                         ),
                     )
                 )
@@ -615,11 +648,37 @@ class VolcengineTTS:
 
         remaining = subtitle.text[cursor:]
         if remaining:
-            marks[-1] = TTSTextMark(
-                text=marks[-1].text + remaining,
-                at_frame=marks[-1].at_frame,
+            marks.append(
+                TTSTextMark(
+                    text=remaining,
+                    at_frame=(
+                        audio_start_frame
+                        + round(
+                            subtitle.words[-1].end_seconds
+                            * self._output_format.sample_rate
+                        )
+                    ),
+                )
             )
         return marks
+
+    def _subtitle_audio_start_frame(
+        self,
+        subtitle: _Subtitle,
+        *,
+        sentence_audio_start_frame: int,
+        sentence_start_seen: bool,
+        received_frames: int,
+    ) -> int:
+        if sentence_start_seen:
+            return sentence_audio_start_frame
+
+        duration_frames = round(
+            subtitle.words[-1].end_seconds * self._output_format.sample_rate
+        )
+        if sentence_audio_start_frame + duration_frames > received_frames:
+            return max(received_frames - duration_frames, 0)
+        return sentence_audio_start_frame
 
     @staticmethod
     async def _text_parts(text: TextInput) -> AsyncIterator[str]:
