@@ -14,6 +14,7 @@ from .config import AppConfig
 from .protocol import (
     COMMAND_ADAPTER,
     InterruptCommand,
+    ResetConversationCommand,
     RuntimeView,
     StartCommand,
     StopCommand,
@@ -124,7 +125,13 @@ def create_app(
 async def _execute_command(
     runtime: RuntimeController,
     view: RuntimeView,
-    command: StartCommand | StopCommand | InterruptCommand | SubmitTextCommand,
+    command: (
+        StartCommand
+        | StopCommand
+        | InterruptCommand
+        | SubmitTextCommand
+        | ResetConversationCommand
+    ),
 ) -> None:
     try:
         match command:
@@ -137,6 +144,9 @@ async def _execute_command(
             case SubmitTextCommand(text=text):
                 runtime.submit_text(text)
                 data = {"accepted": True}
+            case ResetConversationCommand():
+                await runtime.reset_conversation()
+                data = {"reset": True}
         view.send_command_result(command.id, ok=True, data=data)
     except CommandError as error:
         view.send_command_result(

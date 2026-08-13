@@ -20,7 +20,7 @@ from speaklyflow.tts import VolcengineTTS
 from speaklyflow.vad import SileroVAD
 
 from .config import AppConfig, load_config, save_config
-from .history import ConversationHistory, load_history, save_history
+from .history import ConversationHistory, delete_history, load_history, save_history
 from .protocol import RuntimeView
 
 SessionBuilder = Callable[
@@ -206,6 +206,19 @@ class RuntimeController:
             isinstance(event, ErrorEvent) and event.turn_id is not None
         ):
             await self._save_history()
+
+    async def reset_conversation(self) -> None:
+        """Clear persisted and in-memory conversation history."""
+
+        async with self._lock:
+            if self._session_task is not None:
+                raise CommandError(
+                    "session_active",
+                    "Conversation cannot reset while the session is active",
+                )
+            await delete_history(self._history_path)
+            self._message_history.clear()
+            self.view.reset_conversation()
 
     def interrupt(self) -> bool:
         session = self._running_session()

@@ -1,5 +1,6 @@
 """Persistent agent and desktop conversation history."""
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -29,3 +30,9 @@ async def save_history(path: Path, history: ConversationHistory) -> None:
     """Atomically persist one conversation snapshot."""
 
     await save_json(path, history.model_dump(mode="json"))
+
+
+async def delete_history(path: Path) -> None:
+    """Delete persisted conversation history when present."""
+
+    await asyncio.to_thread(path.unlink, missing_ok=True)

@@ -71,8 +71,16 @@ class SubmitTextCommand(_Command):
     text: str
 
 
+class ResetConversationCommand(_Command):
+    type: Literal["conversation.reset"]
+
+
 Command = Annotated[
-    StartCommand | StopCommand | InterruptCommand | SubmitTextCommand,
+    StartCommand
+    | StopCommand
+    | InterruptCommand
+    | SubmitTextCommand
+    | ResetConversationCommand,
     Field(discriminator="type"),
 ]
 COMMAND_ADAPTER = TypeAdapter(Command)
@@ -182,6 +190,12 @@ class RuntimeView:
                 if turn["state"] in {"completed", "interrupted", "failed"}
             ]
         )
+
+    def reset_conversation(self) -> None:
+        """Clear all projected conversation turns."""
+
+        self.turns.clear()
+        self._turns_by_id.clear()
 
     def _apply(self, event: VoiceEvent) -> None:
         match event:
