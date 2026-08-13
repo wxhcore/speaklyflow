@@ -1,6 +1,7 @@
 """Run one interruptible Bumblehive response through TTS and audio output."""
 
 import asyncio
+import time
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -27,8 +28,10 @@ from ..observability import (
     Component,
     PlaybackEvent,
     PlaybackState,
-    ToolEvent,
-    ToolState,
+    SynthesisEvent,
+    SynthesisState,
+    ToolCallFinishedEvent,
+    ToolCallStartedEvent,
     TurnMetrics,
     VoiceEvent,
 )
@@ -268,11 +271,12 @@ class _TurnRunner:
         session_id: str,
         turn_id: int,
         emit: Callable[[VoiceEvent], None],
-        speech_stopped_at: float,
-        estimated_speech_ended_at: float,
-        asr_started_at: float,
-        asr_finished_at: float,
-        asr_audio_seconds: float,
+        prompt_ready_at: float,
+        speech_stopped_at: float | None = None,
+        estimated_speech_ended_at: float | None = None,
+        asr_started_at: float | None = None,
+        asr_finished_at: float | None = None,
+        asr_audio_seconds: float | None = None,
     ) -> None:
         self._prompt = prompt
         self._history = history
@@ -283,6 +287,7 @@ class _TurnRunner:
         self._turn_id = turn_id
         self._emit = emit
         self._metrics = _TurnMetricsTracker(
+            prompt_ready_at=prompt_ready_at,
             speech_stopped_at=speech_stopped_at,
             estimated_speech_ended_at=estimated_speech_ended_at,
             asr_started_at=asr_started_at,
@@ -308,15 +313,20 @@ class _TurnRunner:
         self._playback_task: asyncio.Task[None] | None = None
         self._playback_progress_task: asyncio.Task[None] | None = None
 
-        self._tool_names: dict[str, str] = {}
+        self._synthesis_started_at: float | None = None
+        self._synthesis_terminal = False
+        self._received_first_audio = False
         self._playback_started = False
         self._last_spoken_text = ""
 
-    def interrupt(self) -> None:
+    def interrupt(self) -> bool:
         """Request interruption without blocking microphone capture."""
 
+        if self._interruption.is_set():
+            return False
         self._metrics.mark_interruption_requested()
         self._interruption.set()
+        return True
 
     def failure_messages(self) -> list[_Message]:
         """Return valid history after a failed partial response."""
@@ -460,16 +470,21 @@ class _TurnRunner:
                 if self._interruption.is_set():
                     continue
                 self._metrics.mark_tts_audio()
+                if not self._received_first_audio:
+                    self._received_first_audio = True
+                    self._emit_synthesis(SynthesisState.FIRST_AUDIO)
                 self._playback_items.put_nowait(output)
 
             result = await tts_stream.result()
             self._record_tts_result(result)
             if not result.completed:
                 raise RuntimeError("TTS synthesis did not complete")
+            self._finish_synthesis(SynthesisState.FINISHED)
             self._playback_items.put_nowait(None)
         except asyncio.CancelledError:
             raise
         except Exception as error:
+            self._finish_synthesis(SynthesisState.FAILED)
             raise _TurnFailure(
                 component=Component.TTS,
                 operation="synthesize",
@@ -559,6 +574,7 @@ class _TurnRunner:
             self._playback.spoken_text,
         )
         await self._stop_output()
+        self._finish_synthesis(SynthesisState.INTERRUPTED)
 
         agent_task = self._require_agent_task()
         if self._journal.tools_active and not agent_task.done():
@@ -644,59 +660,60 @@ class _TurnRunner:
             return
 
         if event.kind == TOOL_CALL_STARTED:
-            call = event.payload.get("tool_call")
-            if not isinstance(call, Mapping):
-                return
-            call_id = call.get("call_id")
-            name = call.get("name")
-            if not isinstance(call_id, str) or not isinstance(name, str):
-                return
-            self._tool_names[call_id] = name
+            call = event.payload["tool_call"]
             self._emit(
-                ToolEvent(
+                ToolCallStartedEvent(
                     session_id=self._session_id,
                     turn_id=self._turn_id,
-                    state=ToolState.STARTED,
-                    name=name,
-                    call_id=call_id,
+                    call_id=call["call_id"],
+                    name=call["name"],
+                    arguments=dict(call["arguments"]),
                 )
             )
             return
 
         if event.kind == TOOL_CALL_FINISHED:
-            result = event.payload.get("tool_result")
-            if not isinstance(result, Mapping):
-                return
-            call_id = result.get("tool_call_id")
-            if not isinstance(call_id, str):
-                return
-            name = result.get("name")
-            if not isinstance(name, str):
-                name = self._tool_names.get(call_id, "")
-            duration = event.payload.get("duration_s")
-            elapsed_ms = (
-                round(duration * 1_000, 1)
-                if isinstance(duration, (int, float))
-                else None
-            )
+            result = event.payload["tool_result"]
             self._emit(
-                ToolEvent(
+                ToolCallFinishedEvent(
                     session_id=self._session_id,
                     turn_id=self._turn_id,
-                    state=ToolState.FINISHED,
-                    name=name,
-                    call_id=call_id,
-                    elapsed_ms=elapsed_ms,
-                    succeeded=(
-                        event.payload.get("ok")
-                        if isinstance(event.payload.get("ok"), bool)
-                        else None
-                    ),
+                    call_id=result["tool_call_id"],
+                    name=result["name"],
+                    result=result["content"],
+                    succeeded=event.payload["ok"],
+                    elapsed_ms=round(event.payload["duration_s"] * 1_000, 1),
                 )
             )
 
     def _record_first_tts_text(self) -> None:
         self._metrics.mark_tts_text()
+        if self._synthesis_started_at is None:
+            self._synthesis_started_at = time.perf_counter()
+            self._emit_synthesis(SynthesisState.STARTED)
+
+    def _emit_synthesis(self, state: SynthesisState) -> None:
+        started_at = self._synthesis_started_at
+        if started_at is None:
+            return
+        self._emit(
+            SynthesisEvent(
+                session_id=self._session_id,
+                turn_id=self._turn_id,
+                state=state,
+                elapsed_ms=(
+                    0.0
+                    if state is SynthesisState.STARTED
+                    else _duration_ms(started_at, time.perf_counter())
+                ),
+            )
+        )
+
+    def _finish_synthesis(self, state: SynthesisState) -> None:
+        if self._synthesis_started_at is None or self._synthesis_terminal:
+            return
+        self._synthesis_terminal = True
+        self._emit_synthesis(state)
 
     def _record_tts_result(self, result: TTSResult) -> None:
         self._metrics.set_tts_usage(
@@ -784,6 +801,7 @@ class _TurnRunner:
             except Exception as error:  # noqa: BLE001 - both streams must close
                 errors.append(error)
 
+        self._finish_synthesis(SynthesisState.INTERRUPTED)
         if errors and not suppress_errors:
             raise errors[0]
 
@@ -835,3 +853,7 @@ def _tool_call_ids(message: Mapping[str, Any]) -> list[str]:
         if isinstance(identifier, str) and identifier:
             identifiers.append(identifier)
     return identifiers
+
+
+def _duration_ms(start: float, end: float) -> float:
+    return round(max(end - start, 0) * 1_000, 1)

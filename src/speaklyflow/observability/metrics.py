@@ -8,9 +8,9 @@ from dataclasses import dataclass
 class TurnMetrics:
     """Latency and usage summary for one assistant turn."""
 
-    asr_ms: float
-    vad_stop_to_asr_final_ms: float
-    asr_audio_seconds: float
+    asr_ms: float | None = None
+    vad_stop_to_asr_final_ms: float | None = None
+    asr_audio_seconds: float | None = None
     agent_request_preparation_ms: float | None = None
     agent_first_token_ms: float | None = None
     llm_first_token_ms: float | None = None

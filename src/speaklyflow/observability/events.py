@@ -53,11 +53,21 @@ class TurnState(str, Enum):
     FAILED = "failed"
 
 
-class ToolState(str, Enum):
-    """State of a Bumblehive tool call."""
+class InputSource(str, Enum):
+    """Source that supplied one user turn."""
+
+    VOICE = "voice"
+    TEXT = "text"
+
+
+class SynthesisState(str, Enum):
+    """State of assistant speech synthesis."""
 
     STARTED = "started"
+    FIRST_AUDIO = "first_audio"
     FINISHED = "finished"
+    INTERRUPTED = "interrupted"
+    FAILED = "failed"
 
 
 class PlaybackState(str, Enum):
@@ -110,6 +120,15 @@ class TranscriptEvent(VoiceEvent):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class UserInputEvent(VoiceEvent):
+    """User text accepted for one voice or text turn."""
+
+    turn_id: int
+    source: InputSource
+    text: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class TurnEvent(VoiceEvent):
     """Assistant turn lifecycle transition."""
 
@@ -134,15 +153,34 @@ class AgentTextEvent(VoiceEvent):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class ToolEvent(VoiceEvent):
-    """Sanitized tool-call state for application presentation."""
+class ToolCallStartedEvent(VoiceEvent):
+    """Bumblehive tool call ready for execution."""
 
     turn_id: int
-    state: ToolState
-    name: str
     call_id: str
-    elapsed_ms: float | None = None
-    succeeded: bool | None = None
+    name: str
+    arguments: Mapping[str, Any]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ToolCallFinishedEvent(VoiceEvent):
+    """Completed Bumblehive tool call and its execution result."""
+
+    turn_id: int
+    call_id: str
+    name: str
+    result: str
+    succeeded: bool
+    elapsed_ms: float
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SynthesisEvent(VoiceEvent):
+    """Assistant speech synthesis transition and elapsed time."""
+
+    turn_id: int
+    state: SynthesisState
+    elapsed_ms: float
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

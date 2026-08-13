@@ -16,6 +16,7 @@ from ..observability import (
     ComponentEvent,
     ComponentState,
     ErrorEvent,
+    InputSource,
     MetricsEvent,
     SessionEvent,
     SessionState,
@@ -24,6 +25,7 @@ from ..observability import (
     TranscriptEvent,
     TurnEvent,
     TurnState,
+    UserInputEvent,
     VoiceEvent,
     VoiceObserver,
 )
@@ -36,10 +38,19 @@ _Close = Callable[[], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
-class _CapturedSegment:
+class _VoiceInput:
     audio: AudioChunk
     speech_stopped_at: float
     estimated_speech_ended_at: float
+
+
+@dataclass(frozen=True, slots=True)
+class _TextInput:
+    text: str
+    submitted_at: float
+
+
+_TurnInput = _VoiceInput | _TextInput
 
 
 class VoiceSession:
@@ -74,12 +85,15 @@ class VoiceSession:
         self._events = _EventDispatcher(observers)
 
         self._segmenter = SpeechSegmenter()
-        self._segments: asyncio.Queue[_CapturedSegment] = asyncio.Queue(maxsize=1)
+        self._inputs: asyncio.Queue[_TurnInput] = asyncio.Queue(maxsize=1)
         self._capture_task: asyncio.Task[None] | None = None
         self._active_turn: _TurnRunner | None = None
+        self._run_task: asyncio.Task[None] | None = None
         self._turn_id = 0
         self._started_closers: list[tuple[Component, _Close]] = []
         self._reported_errors: list[BaseException] = []
+        self._accepting_inputs = False
+        self._stop_requested = False
         self._used = False
 
     @property
@@ -100,6 +114,7 @@ class VoiceSession:
         if self._used:
             raise RuntimeError("VoiceSession can only be run once")
         self._used = True
+        self._run_task = asyncio.current_task()
         self._events.start()
         self._emit(
             SessionEvent(session_id=self._session_id, state=SessionState.STARTING)
@@ -107,17 +122,19 @@ class VoiceSession:
 
         try:
             await self._start_components()
-            self._emit(
-                SessionEvent(session_id=self._session_id, state=SessionState.READY)
-            )
             self._capture_task = asyncio.create_task(
                 self._capture(),
                 name="speaklyflow-audio-capture",
             )
+            self._accepting_inputs = True
+            self._emit(
+                SessionEvent(session_id=self._session_id, state=SessionState.READY)
+            )
             await self._run_conversation()
         except asyncio.CancelledError:
             await self._finish(suppress_errors=True)
-            raise
+            if not self._stop_requested:
+                raise
         except BaseException as error:
             self._emit_error(
                 component=Component.SESSION,
@@ -129,13 +146,52 @@ class VoiceSession:
             raise
         else:
             await self._finish(suppress_errors=False)
+        finally:
+            self._accepting_inputs = False
+            self._run_task = None
+
+    async def stop(self) -> None:
+        """Stop the session and wait for its resources to close."""
+
+        task = self._run_task
+        if task is None:
+            return
+        self._accepting_inputs = False
+        self._stop_requested = True
+        task.cancel()
+        await task
+
+    def interrupt(self) -> bool:
+        """Interrupt the active assistant turn, if one is running."""
+
+        turn = self._active_turn
+        if turn is None:
+            return False
+        return turn.interrupt()
+
+    def submit_text(self, text: str) -> None:
+        """Queue one text input for the conversation."""
+
+        if not self._accepting_inputs:
+            raise RuntimeError("VoiceSession is not ready")
+        if not text.strip():
+            raise ValueError("Text input must not be empty")
+        self._inputs.put_nowait(_TextInput(text, time.perf_counter()))
 
     async def _run_conversation(self) -> None:
         while True:
-            segment = await self._next_segment()
+            turn_input = await self._next_input()
+            if isinstance(turn_input, _TextInput):
+                await self._run_turn(
+                    turn_input.text,
+                    source=InputSource.TEXT,
+                    prompt_ready_at=turn_input.submitted_at,
+                )
+                continue
+
             asr_started_at = time.perf_counter()
             try:
-                transcript = await self._asr.transcribe(segment.audio)
+                transcript = await self._asr.transcribe(turn_input.audio)
             except asyncio.CancelledError:
                 raise
             except Exception as error:  # noqa: BLE001 - provider failure is input-local
@@ -157,11 +213,13 @@ class VoiceSession:
                 )
                 await self._run_turn(
                     transcript.text,
-                    speech_stopped_at=segment.speech_stopped_at,
-                    estimated_speech_ended_at=segment.estimated_speech_ended_at,
+                    source=InputSource.VOICE,
+                    prompt_ready_at=asr_finished_at,
+                    speech_stopped_at=turn_input.speech_stopped_at,
+                    estimated_speech_ended_at=turn_input.estimated_speech_ended_at,
                     asr_started_at=asr_started_at,
                     asr_finished_at=asr_finished_at,
-                    asr_audio_seconds=segment.audio.duration_seconds,
+                    asr_audio_seconds=turn_input.audio.duration_seconds,
                 )
 
     async def _capture(self) -> None:
@@ -188,9 +246,7 @@ class VoiceSession:
                             state=SpeechState.STARTED,
                         )
                     )
-                    active_turn = self._active_turn
-                    if active_turn is not None:
-                        active_turn.interrupt()
+                    self.interrupt()
 
                 segment = self._segmenter.push(chunk, state)
                 if segment is not None:
@@ -201,8 +257,8 @@ class VoiceSession:
                             state=SpeechState.STOPPED,
                         )
                     )
-                    await self._segments.put(
-                        _CapturedSegment(
+                    await self._inputs.put(
+                        _VoiceInput(
                             audio=segment,
                             speech_stopped_at=speech_stopped_at,
                             estimated_speech_ended_at=(
@@ -223,14 +279,14 @@ class VoiceSession:
             )
             raise
 
-    async def _next_segment(self) -> _CapturedSegment:
+    async def _next_input(self) -> _TurnInput:
         capture_task = self._capture_task
         if capture_task is None:
             raise RuntimeError("VoiceSession audio capture is not running")
 
         receive = asyncio.create_task(
-            self._segments.get(),
-            name="speaklyflow-next-segment",
+            self._inputs.get(),
+            name="speaklyflow-next-input",
         )
         try:
             done, _ = await asyncio.wait(
@@ -250,14 +306,24 @@ class VoiceSession:
         self,
         prompt: str,
         *,
-        speech_stopped_at: float,
-        estimated_speech_ended_at: float,
-        asr_started_at: float,
-        asr_finished_at: float,
-        asr_audio_seconds: float,
+        source: InputSource,
+        prompt_ready_at: float,
+        speech_stopped_at: float | None = None,
+        estimated_speech_ended_at: float | None = None,
+        asr_started_at: float | None = None,
+        asr_finished_at: float | None = None,
+        asr_audio_seconds: float | None = None,
     ) -> None:
         self._turn_id += 1
         turn_id = self._turn_id
+        self._emit(
+            UserInputEvent(
+                session_id=self._session_id,
+                turn_id=turn_id,
+                source=source,
+                text=prompt,
+            )
+        )
         self._emit(
             TurnEvent(
                 session_id=self._session_id,
@@ -274,6 +340,7 @@ class VoiceSession:
             session_id=self._session_id,
             turn_id=turn_id,
             emit=self._emit,
+            prompt_ready_at=prompt_ready_at,
             speech_stopped_at=speech_stopped_at,
             estimated_speech_ended_at=estimated_speech_ended_at,
             asr_started_at=asr_started_at,

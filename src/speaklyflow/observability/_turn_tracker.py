@@ -12,12 +12,14 @@ class _TurnMetricsTracker:
     def __init__(
         self,
         *,
-        speech_stopped_at: float,
-        estimated_speech_ended_at: float,
-        asr_started_at: float,
-        asr_finished_at: float,
-        asr_audio_seconds: float,
+        prompt_ready_at: float,
+        speech_stopped_at: float | None = None,
+        estimated_speech_ended_at: float | None = None,
+        asr_started_at: float | None = None,
+        asr_finished_at: float | None = None,
+        asr_audio_seconds: float | None = None,
     ) -> None:
+        self._prompt_ready_at = prompt_ready_at
         self._speech_stopped_at = speech_stopped_at
         self._estimated_speech_ended_at = estimated_speech_ended_at
         self._asr_started_at = asr_started_at
@@ -87,18 +89,21 @@ class _TurnMetricsTracker:
         """Build metrics from all milestones observed so far."""
 
         return TurnMetrics(
-            asr_ms=_duration_ms(self._asr_started_at, self._asr_finished_at),
-            vad_stop_to_asr_final_ms=_duration_ms(
+            asr_ms=_optional_duration_ms(
+                self._asr_started_at,
+                self._asr_finished_at,
+            ),
+            vad_stop_to_asr_final_ms=_optional_duration_ms(
                 self._speech_stopped_at,
                 self._asr_finished_at,
             ),
             asr_audio_seconds=self._asr_audio_seconds,
             agent_request_preparation_ms=_optional_duration_ms(
-                self._asr_finished_at,
+                self._prompt_ready_at,
                 self._model_request_at,
             ),
             agent_first_token_ms=_optional_duration_ms(
-                self._asr_finished_at,
+                self._prompt_ready_at,
                 self._first_agent_text_at,
             ),
             llm_first_token_ms=_optional_duration_ms(
