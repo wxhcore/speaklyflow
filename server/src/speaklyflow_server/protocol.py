@@ -13,6 +13,7 @@ from speaklyflow.observability import (
     AgentTextEvent,
     ComponentEvent,
     ErrorEvent,
+    InputLevelEvent,
     MetricsEvent,
     PlaybackEvent,
     PlaybackState,
@@ -34,6 +35,7 @@ from speaklyflow.observability import (
 _EVENT_TYPES: dict[type[VoiceEvent], str] = {
     SessionEvent: "session.state",
     ComponentEvent: "component.state",
+    InputLevelEvent: "audio.input_level",
     SpeechEvent: "speech.state",
     TranscriptEvent: "transcript.final",
     UserInputEvent: "turn.input",
@@ -101,6 +103,7 @@ class RuntimeView:
         self.session_id: str | None = None
         self.sequence = 0
         self.components: dict[str, dict[str, Any]] = {}
+        self.input_level = 0.0
         self.turns = copy.deepcopy(turns) if turns is not None else []
         self.error: dict[str, Any] | None = None
 
@@ -133,8 +136,16 @@ class RuntimeView:
         """Consume one SpeaklyFlow event without blocking its dispatcher."""
 
         self._apply(event)
-        data = asdict(event)
-        timestamp = data.pop("timestamp")
+        if isinstance(event, AgentRequestEvent):
+            data = {
+                "session_id": event.session_id,
+                "turn_id": event.turn_id,
+                "message_count": len(event.messages),
+            }
+            timestamp = event.timestamp
+        else:
+            data = asdict(event)
+            timestamp = data.pop("timestamp")
         self._publish(_EVENT_TYPES[type(event)], data, timestamp=timestamp)
 
     def subscribe(self) -> asyncio.Queue[dict[str, Any]]:
@@ -176,6 +187,7 @@ class RuntimeView:
             "session_id": self.session_id,
             "sequence": self.sequence,
             "components": copy.deepcopy(self.components),
+            "input_level": self.input_level,
             "turns": copy.deepcopy(self.turns),
             "error": copy.deepcopy(self.error),
         }
@@ -213,11 +225,14 @@ class RuntimeView:
                     self.runtime_state = "idle"
                 self._discard_active_turn()
                 self._clear_activity()
+                self.input_level = 0.0
             case ComponentEvent():
                 self.components[event.component.value] = {
                     "state": event.state.value,
                     "elapsed_ms": event.elapsed_ms,
                 }
+            case InputLevelEvent():
+                self.input_level = event.level
             case SpeechEvent(state=SpeechState.STARTED):
                 self._speech_active = True
                 self._awaiting_transcript = False
@@ -339,6 +354,7 @@ class RuntimeView:
     def _reset_session(self, session_id: str) -> None:
         self.session_id = session_id
         self.components.clear()
+        self.input_level = 0.0
         self._turns_by_id.clear()
         self.error = None
         self._clear_activity()

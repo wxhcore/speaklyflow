@@ -8,7 +8,8 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import ValidationError
+from openai import AsyncOpenAI, OpenAIError
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, ValidationError
 
 from .config import AppConfig
 from .protocol import (
@@ -30,6 +31,13 @@ DEFAULT_ORIGINS = (
     "http://tauri.localhost",
     "tauri://localhost",
 )
+
+
+class ModelListRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    base_url: HttpUrl
+    api_key: str = Field(min_length=1)
 
 
 def create_app(
@@ -54,7 +62,7 @@ def create_app(
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(DEFAULT_ORIGINS),
-        allow_methods=["GET", "PUT"],
+        allow_methods=["GET", "POST", "PUT"],
         allow_headers=["Content-Type"],
     )
 
@@ -77,8 +85,23 @@ def create_app(
         except CommandError as error:
             raise HTTPException(status_code=409, detail=error.code) from error
 
+    @app.post("/api/models")
+    async def list_models(request: ModelListRequest) -> dict[str, list[str]]:
+        try:
+            models = await _fetch_models(str(request.base_url), request.api_key)
+        except OpenAIError as error:
+            raise HTTPException(
+                status_code=502,
+                detail="无法从模型服务获取模型列表",
+            ) from error
+        return {"models": models}
+
     @app.websocket("/ws")
     async def runtime_socket(websocket: WebSocket) -> None:
+        origin = websocket.headers.get("origin")
+        if origin is not None and origin not in DEFAULT_ORIGINS:
+            await websocket.close(code=1008, reason="Origin not allowed")
+            return
         await websocket.accept()
         runtime = websocket.app.state.runtime
         view = runtime.view
@@ -181,3 +204,12 @@ def _runtime(request: Request) -> RuntimeController:
 
 def _resolve_config_path(config_path: Path | None) -> Path:
     return (config_path or Path.home() / ".speaklyflow" / "config.json").expanduser()
+
+
+async def _fetch_models(base_url: str, api_key: str) -> list[str]:
+    client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+    try:
+        response = await client.models.list()
+        return list(dict.fromkeys(model.id for model in response.data if model.id))
+    finally:
+        await client.close()
