@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 
 import bumblehive
+import numpy as np
 
 from ..agent import BumblehiveAgent
 from ..asr import ASR, SpeechSegmenter
@@ -16,6 +17,7 @@ from ..observability import (
     ComponentEvent,
     ComponentState,
     ErrorEvent,
+    InputLevelEvent,
     InputSource,
     MetricsEvent,
     SessionEvent,
@@ -35,6 +37,7 @@ from ..vad import VAD, VADState
 from .turn import _TurnFailure, _TurnRunner
 
 _Close = Callable[[], Awaitable[None]]
+_INPUT_LEVEL_INTERVAL_SECONDS = 0.1
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,8 +227,18 @@ class VoiceSession:
 
     async def _capture(self) -> None:
         previous = VADState.SILENCE
+        next_level_at = 0.0
         try:
             async for chunk in self._audio.capture():
+                now = time.perf_counter()
+                if now >= next_level_at:
+                    self._emit(
+                        InputLevelEvent(
+                            session_id=self._session_id,
+                            level=_input_level(chunk),
+                        )
+                    )
+                    next_level_at = now + _INPUT_LEVEL_INTERVAL_SECONDS
                 try:
                     state = await self._vad.analyze(chunk)
                 except asyncio.CancelledError:
@@ -278,6 +291,8 @@ class VoiceSession:
                 fatal=True,
             )
             raise
+        finally:
+            self._emit(InputLevelEvent(session_id=self._session_id, level=0.0))
 
     async def _next_input(self) -> _TurnInput:
         capture_task = self._capture_task
@@ -636,3 +651,11 @@ class VoiceSession:
 
 def _duration_ms(start: float, end: float) -> float:
     return round(max(end - start, 0) * 1_000, 1)
+
+
+def _input_level(chunk: AudioChunk) -> float:
+    samples = np.frombuffer(chunk.data, dtype="<i2")
+    if samples.size == 0:
+        return 0.0
+    rms = np.sqrt(np.mean(np.square(samples, dtype=np.float64)))
+    return min(float(rms / 32_768), 1.0)

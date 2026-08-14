@@ -112,6 +112,13 @@ class SpeechEvent(VoiceEvent):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class InputLevelEvent(VoiceEvent):
+    """Linear RMS level measured from captured microphone audio."""
+
+    level: float
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class TranscriptEvent(VoiceEvent):
     """Final text recognized from one speech segment."""
 
