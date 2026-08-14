@@ -22,6 +22,7 @@ from speaklyflow.vad import SileroVAD
 from .config import AppConfig, load_config, save_config
 from .history import ConversationHistory, delete_history, load_history, save_history
 from .protocol import RuntimeView
+from .resources import resolve_resource_path
 
 SessionBuilder = Callable[
     [AppConfig, VoiceObserver, bumblehive.MessageHistory],
@@ -71,7 +72,7 @@ def build_session(
             speech_end_ms=vad_config.speech_end_ms,
         ),
         asr=SenseVoiceASR(
-            model_dir=asr_settings.model_dir,
+            model_dir=resolve_resource_path(asr_settings.model_dir),
             threads=asr_settings.threads,
             language=asr_settings.language,
             use_itn=asr_settings.use_itn,
