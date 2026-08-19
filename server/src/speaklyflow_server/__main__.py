@@ -18,8 +18,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--port",
         type=int,
-        default=18422,
-        help="Localhost port (default: 18422)",
+        default=17841,
+        help="Localhost port (default: 17841)",
     )
     return parser.parse_args(argv)
 

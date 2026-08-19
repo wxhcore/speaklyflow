@@ -6,9 +6,11 @@ from typing import Self
 
 import bumblehive
 from bumblehive.agent import AgentRunResult
-from bumblehive.config import ConfigInput
+from bumblehive.config import ConfigInput, load_config
 from bumblehive.observability import AgentEvent, AsyncEventStream
 from bumblehive.tools import ToolManager
+
+from .instructions import VOICE_AGENT_INSTRUCTIONS
 
 
 class AgentTurn:
@@ -41,7 +43,16 @@ class BumblehiveAgent:
     """Create streamed Bumblehive turns without committing history early."""
 
     def __init__(self, config: ConfigInput = None) -> None:
-        self._runtime = bumblehive.from_config(config)
+        resolved = load_config(config)
+        if not (resolved.agent.instructions or "").strip():
+            resolved = replace(
+                resolved,
+                agent=replace(
+                    resolved.agent,
+                    instructions=VOICE_AGENT_INSTRUCTIONS,
+                ),
+            )
+        self._runtime = bumblehive.from_config(resolved)
 
     @property
     def tools(self) -> ToolManager:

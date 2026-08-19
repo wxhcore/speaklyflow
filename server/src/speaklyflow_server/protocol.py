@@ -73,8 +73,8 @@ class SubmitTextCommand(_Command):
     text: str
 
 
-class ResetConversationCommand(_Command):
-    type: Literal["conversation.reset"]
+class NewConversationCommand(_Command):
+    type: Literal["conversation.new"]
 
 
 Command = Annotated[
@@ -82,7 +82,7 @@ Command = Annotated[
     | StopCommand
     | InterruptCommand
     | SubmitTextCommand
-    | ResetConversationCommand,
+    | NewConversationCommand,
     Field(discriminator="type"),
 ]
 COMMAND_ADAPTER = TypeAdapter(Command)
@@ -203,8 +203,8 @@ class RuntimeView:
             ]
         )
 
-    def reset_conversation(self) -> None:
-        """Clear all projected conversation turns."""
+    def new_conversation(self) -> None:
+        """Clear the projection for a newly created conversation."""
 
         self.turns.clear()
         self._turns_by_id.clear()

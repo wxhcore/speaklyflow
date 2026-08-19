@@ -106,6 +106,66 @@ async def test_controller_runs_exactly_one_session(
 
 
 @pytest.mark.asyncio
+async def test_controller_uses_speaklyflow_workspace_by_default(
+    tmp_path: Path,
+    app_config: AppConfig,
+) -> None:
+    config_path = tmp_path / "config.json"
+    await save_config(config_path, app_config)
+    built_configs: list[AppConfig] = []
+
+    def builder(
+        config: AppConfig,
+        observer: VoiceObserver,
+        history: bumblehive.MessageHistory,
+    ) -> Any:
+        built_configs.append(config)
+        return FakeSession(observer, history)
+
+    runtime = RuntimeController(config_path, session_builder=builder)
+
+    await runtime.start()
+    assert built_configs[0].bumblehive["runtime"]["workspace"] == str(
+        tmp_path / "workspace"
+    )
+    stored_config = runtime.config_response()["config"]
+    assert isinstance(stored_config, dict)
+    assert "runtime" not in stored_config["bumblehive"]
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_controller_preserves_configured_workspace(
+    tmp_path: Path,
+    config_data: dict[str, Any],
+) -> None:
+    configured_workspace = tmp_path / "custom-workspace"
+    config_data["bumblehive"]["runtime"] = {
+        "workspace": str(configured_workspace)
+    }
+    app_config = AppConfig.model_validate(config_data)
+    config_path = tmp_path / "config.json"
+    await save_config(config_path, app_config)
+    built_configs: list[AppConfig] = []
+
+    def builder(
+        config: AppConfig,
+        observer: VoiceObserver,
+        history: bumblehive.MessageHistory,
+    ) -> Any:
+        built_configs.append(config)
+        return FakeSession(observer, history)
+
+    runtime = RuntimeController(config_path, session_builder=builder)
+
+    await runtime.start()
+    assert built_configs[0].bumblehive["runtime"]["workspace"] == str(
+        configured_workspace
+    )
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
 async def test_config_cannot_change_during_session(
     tmp_path: Path,
     app_config: AppConfig,
@@ -241,7 +301,7 @@ async def test_controller_restores_agent_and_frontend_history(
 
 
 @pytest.mark.asyncio
-async def test_reset_conversation_clears_history_when_session_is_inactive(
+async def test_new_conversation_replaces_history_and_stops_active_voice(
     tmp_path: Path,
     app_config: AppConfig,
 ) -> None:
@@ -274,12 +334,22 @@ async def test_reset_conversation_clears_history_when_session_is_inactive(
 
     runtime = RuntimeController(config_path, session_builder=builder)
 
-    await runtime.reset_conversation()
-
-    assert not history_path.exists()
-    assert runtime.view.snapshot()["turns"] == []
+    old_conversation_id = "conversation-1"
     await runtime.start()
-    assert histories[0].get_history() == []
-    with pytest.raises(CommandError, match="cannot reset"):
-        await runtime.reset_conversation()
+    await asyncio.sleep(0)
+
+    new_conversation_id = await runtime.new_conversation()
+
+    assert new_conversation_id != old_conversation_id
+    assert runtime.view.runtime_state == "idle"
+    assert runtime.view.snapshot()["turns"] == []
+    stored = load_history(history_path)
+    assert stored is not None
+    assert stored.conversation_id == new_conversation_id
+    assert stored.messages == []
+    assert stored.turns == []
+
+    await runtime.start()
+    assert histories[-1].conversation_id == new_conversation_id
+    assert histories[-1].get_history() == []
     await runtime.stop()

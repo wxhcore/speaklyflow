@@ -13,7 +13,7 @@ class StubController:
     def __init__(self) -> None:
         self.view = RuntimeView("idle")
         self.stopped = False
-        self.reset = False
+        self.new_conversation_requested = False
         self.texts: list[str] = []
 
     def config_response(self) -> dict[str, object]:
@@ -32,8 +32,9 @@ class StubController:
     def submit_text(self, text: str) -> None:
         self.texts.append(text)
 
-    async def reset_conversation(self) -> None:
-        self.reset = True
+    async def new_conversation(self) -> str:
+        self.new_conversation_requested = True
+        return "conversation-2"
 
 
 def test_resolve_config_path() -> None:
@@ -72,14 +73,14 @@ def test_health_and_websocket_commands(tmp_path: Path) -> None:
         }
         with client.websocket_connect("/ws") as websocket:
             assert websocket.receive_json()["type"] == "snapshot"
-            websocket.send_json({"id": "0", "type": "conversation.reset"})
+            websocket.send_json({"id": "0", "type": "conversation.new"})
             assert websocket.receive_json() == {
                 "type": "command.result",
                 "id": "0",
                 "ok": True,
-                "data": {"reset": True},
+                "data": {"conversation_id": "conversation-2"},
             }
-            assert controller.reset is True
+            assert controller.new_conversation_requested is True
             websocket.send_json({"id": "1", "type": "session.start"})
             assert websocket.receive_json() == {
                 "type": "command.result",

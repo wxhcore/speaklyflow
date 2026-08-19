@@ -20,7 +20,7 @@ from speaklyflow.tts import VolcengineTTS
 from speaklyflow.vad import SileroVAD
 
 from .config import AppConfig, load_config, save_config
-from .history import ConversationHistory, delete_history, load_history, save_history
+from .history import ConversationHistory, load_history, save_history
 from .protocol import RuntimeView
 from .resources import resolve_resource_path
 
@@ -86,6 +86,15 @@ def build_session(
     )
 
 
+def _with_default_workspace(config: AppConfig, workspace: Path) -> AppConfig:
+    bumblehive_config = dict(config.bumblehive)
+    runtime_config = dict(bumblehive_config.get("runtime") or {})
+    if not runtime_config.get("workspace"):
+        runtime_config["workspace"] = str(workspace)
+    bumblehive_config["runtime"] = runtime_config
+    return config.model_copy(update={"bumblehive": bumblehive_config})
+
+
 class RuntimeController:
     """Own one local VoiceSession, configuration, and conversation history."""
 
@@ -97,6 +106,7 @@ class RuntimeController:
     ) -> None:
         self._config_path = config_path
         self._history_path = config_path.parent / "history.json"
+        self._default_workspace = config_path.parent / "workspace"
         self._session_builder = session_builder
         self._lock = asyncio.Lock()
         self._session: VoiceSession | None = None
@@ -154,8 +164,12 @@ class RuntimeController:
                 raise CommandError("config_missing", "Server configuration is missing")
 
             try:
-                session = self._session_builder(
+                session_config = _with_default_workspace(
                     self._config,
+                    self._default_workspace,
+                )
+                session = self._session_builder(
+                    session_config,
                     self,
                     self._message_history,
                 )
@@ -208,18 +222,15 @@ class RuntimeController:
         ):
             await self._save_history()
 
-    async def reset_conversation(self) -> None:
-        """Clear persisted and in-memory conversation history."""
+    async def new_conversation(self) -> str:
+        """End voice activity and replace the current conversation."""
 
+        await self.stop()
         async with self._lock:
-            if self._session_task is not None:
-                raise CommandError(
-                    "session_active",
-                    "Conversation cannot reset while the session is active",
-                )
-            await delete_history(self._history_path)
-            self._message_history.clear()
-            self.view.reset_conversation()
+            self._message_history = bumblehive.MessageHistory()
+            self.view.new_conversation()
+            await self._save_history()
+            return self._message_history.conversation_id
 
     def interrupt(self) -> bool:
         session = self._running_session()

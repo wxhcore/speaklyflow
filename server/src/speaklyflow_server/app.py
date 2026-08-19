@@ -15,7 +15,7 @@ from .config import AppConfig
 from .protocol import (
     COMMAND_ADAPTER,
     InterruptCommand,
-    ResetConversationCommand,
+    NewConversationCommand,
     RuntimeView,
     StartCommand,
     StopCommand,
@@ -26,8 +26,8 @@ from .runtime import CommandError, RuntimeController
 logger = logging.getLogger(__name__)
 
 DEFAULT_ORIGINS = (
-    "http://127.0.0.1:1420",
-    "http://localhost:1420",
+    "http://127.0.0.1:17840",
+    "http://localhost:17840",
     "http://tauri.localhost",
     "tauri://localhost",
 )
@@ -153,7 +153,7 @@ async def _execute_command(
         | StopCommand
         | InterruptCommand
         | SubmitTextCommand
-        | ResetConversationCommand
+        | NewConversationCommand
     ),
 ) -> None:
     try:
@@ -167,9 +167,8 @@ async def _execute_command(
             case SubmitTextCommand(text=text):
                 runtime.submit_text(text)
                 data = {"accepted": True}
-            case ResetConversationCommand():
-                await runtime.reset_conversation()
-                data = {"reset": True}
+            case NewConversationCommand():
+                data = {"conversation_id": await runtime.new_conversation()}
         view.send_command_result(command.id, ok=True, data=data)
     except CommandError as error:
         view.send_command_result(

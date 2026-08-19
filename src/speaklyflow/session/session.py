@@ -173,13 +173,26 @@ class VoiceSession:
         return turn.interrupt()
 
     def submit_text(self, text: str) -> None:
-        """Queue one text input for the conversation."""
+        """Interrupt an active reply and queue one text input."""
 
         if not self._accepting_inputs:
             raise RuntimeError("VoiceSession is not ready")
         if not text.strip():
             raise ValueError("Text input must not be empty")
-        self._inputs.put_nowait(_TextInput(text, time.perf_counter()))
+        turn = self._active_turn
+        if turn is not None:
+            turn.interrupt()
+
+        item = _TextInput(text, time.perf_counter())
+        try:
+            self._inputs.put_nowait(item)
+        except asyncio.QueueFull:
+            queued = self._inputs.get_nowait()
+            if turn is not None and isinstance(queued, _VoiceInput):
+                self._inputs.put_nowait(item)
+                return
+            self._inputs.put_nowait(queued)
+            raise
 
     async def _run_conversation(self) -> None:
         while True:

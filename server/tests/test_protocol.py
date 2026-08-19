@@ -1,6 +1,6 @@
 from speaklyflow_server.protocol import (
     COMMAND_ADAPTER,
-    ResetConversationCommand,
+    NewConversationCommand,
     RuntimeView,
 )
 
@@ -202,9 +202,9 @@ def test_session_stop_discards_an_uncommitted_turn() -> None:
     assert view.snapshot()["turns"] == []
 
 
-def test_reset_command_and_projection() -> None:
+def test_new_conversation_command_and_projection() -> None:
     command = COMMAND_ADAPTER.validate_python(
-        {"id": "reset-1", "type": "conversation.reset"}
+        {"id": "new-1", "type": "conversation.new"}
     )
     view = RuntimeView(
         "idle",
@@ -217,8 +217,8 @@ def test_reset_command_and_projection() -> None:
         ],
     )
 
-    assert isinstance(command, ResetConversationCommand)
+    assert isinstance(command, NewConversationCommand)
 
-    view.reset_conversation()
+    view.new_conversation()
 
     assert view.snapshot()["turns"] == []

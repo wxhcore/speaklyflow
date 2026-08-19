@@ -33,7 +33,7 @@ def main() -> None:
     if importlib.util.find_spec("PyInstaller") is None:
         raise SystemExit(
             "PyInstaller is missing; install the project build dependencies "
-            "for SPEAKLYFLOW_PYTHON"
+            "in the active Python environment"
         )
 
     subprocess.run(

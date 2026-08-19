@@ -5,7 +5,7 @@ def test_cli_allows_omitting_config() -> None:
     args = parse_args([])
 
     assert args.config is None
-    assert args.port == 18422
+    assert args.port == 17841
 
 
 def test_cli_parses_config_and_port() -> None:

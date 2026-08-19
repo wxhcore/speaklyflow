@@ -3,12 +3,14 @@
 import asyncio
 import json
 import logging
+import ssl
 import uuid
 from collections.abc import AsyncIterable, AsyncIterator
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, Self
 
+import certifi
 import websockets
 from websockets.exceptions import ConnectionClosed
 
@@ -354,6 +356,7 @@ class VolcengineTTS:
         try:
             websocket = await websockets.connect(
                 _URL,
+                ssl=ssl.create_default_context(cafile=certifi.where()),
                 additional_headers={
                     "X-Api-Key": self._api_key,
                     "X-Api-Resource-Id": self._resource_id,
