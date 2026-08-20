@@ -1,3 +1,6 @@
+from datetime import UTC, datetime
+
+from speaklyflow_server.proactive import ProactiveRequest, ProactiveState
 from speaklyflow_server.protocol import (
     COMMAND_ADAPTER,
     NewConversationCommand,
@@ -222,3 +225,59 @@ def test_new_conversation_command_and_projection() -> None:
     view.new_conversation()
 
     assert view.snapshot()["turns"] == []
+
+
+def test_proactive_offer_and_hidden_input_are_projected_safely() -> None:
+    view = RuntimeView("running")
+    queue = view.subscribe()
+    queue.get_nowait()
+    request = ProactiveRequest(
+        id="request-1",
+        title="产品会议",
+        instruction="private agent instruction",
+        available_at=datetime.now(UTC),
+        state=ProactiveState.OFFERED,
+    )
+
+    view.set_proactive_offer(request)
+    offer_message = queue.get_nowait()
+    view.on_event(
+        UserInputEvent(
+            session_id="session",
+            turn_id=1,
+            source=InputSource.PROACTIVE,
+            text="private agent instruction",
+        )
+    )
+    input_message = queue.get_nowait()
+
+    assert offer_message["data"]["offer"] == {
+        "id": "request-1",
+        "title": "产品会议",
+        "available_at": request.available_at.isoformat(),
+        "state": "offered",
+    }
+    assert "instruction" not in offer_message["data"]["offer"]
+    assert input_message["data"]["text"] == ""
+    assert view.snapshot()["turns"][0]["source"] == "proactive"
+    assert view.snapshot()["turns"][0]["user_text"] == ""
+
+
+def test_followup_internal_input_is_hidden() -> None:
+    view = RuntimeView("running")
+    queue = view.subscribe()
+    queue.get_nowait()
+
+    view.on_event(
+        UserInputEvent(
+            session_id="session",
+            turn_id=1,
+            source=InputSource.FOLLOWUP,
+            text="private follow-up instruction",
+        )
+    )
+    message = queue.get_nowait()
+
+    assert message["data"]["text"] == ""
+    assert view.snapshot()["turns"][0]["source"] == "followup"
+    assert view.snapshot()["turns"][0]["user_text"] == ""

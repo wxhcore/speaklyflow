@@ -14,6 +14,7 @@ from speaklyflow.observability import (
     ComponentEvent,
     ErrorEvent,
     InputLevelEvent,
+    InputSource,
     MetricsEvent,
     PlaybackEvent,
     PlaybackState,
@@ -31,6 +32,8 @@ from speaklyflow.observability import (
     UserInputEvent,
     VoiceEvent,
 )
+
+from .proactive import ProactiveRequest
 
 _EVENT_TYPES: dict[type[VoiceEvent], str] = {
     SessionEvent: "session.state",
@@ -77,12 +80,31 @@ class NewConversationCommand(_Command):
     type: Literal["conversation.new"]
 
 
+class AnswerProactiveCommand(_Command):
+    type: Literal["proactive.answer"]
+    request_id: str = Field(min_length=1)
+
+
+class DismissProactiveCommand(_Command):
+    type: Literal["proactive.dismiss"]
+    request_id: str = Field(min_length=1)
+
+
+class SnoozeProactiveCommand(_Command):
+    type: Literal["proactive.snooze"]
+    request_id: str = Field(min_length=1)
+    minutes: int = Field(gt=0, le=1_440)
+
+
 Command = Annotated[
     StartCommand
     | StopCommand
     | InterruptCommand
     | SubmitTextCommand
-    | NewConversationCommand,
+    | NewConversationCommand
+    | AnswerProactiveCommand
+    | DismissProactiveCommand
+    | SnoozeProactiveCommand,
     Field(discriminator="type"),
 ]
 COMMAND_ADAPTER = TypeAdapter(Command)
@@ -106,6 +128,7 @@ class RuntimeView:
         self.input_level = 0.0
         self.turns = copy.deepcopy(turns) if turns is not None else []
         self.error: dict[str, Any] | None = None
+        self.proactive_offer: dict[str, Any] | None = None
 
         self._turns_by_id: dict[int, dict[str, Any]] = {}
         self._active_turn_id: int | None = None
@@ -143,10 +166,36 @@ class RuntimeView:
                 "message_count": len(event.messages),
             }
             timestamp = event.timestamp
+        elif isinstance(event, UserInputEvent) and event.source in {
+            InputSource.PROACTIVE,
+            InputSource.FOLLOWUP,
+        }:
+            data = asdict(event)
+            data["text"] = ""
+            timestamp = data.pop("timestamp")
         else:
             data = asdict(event)
             timestamp = data.pop("timestamp")
         self._publish(_EVENT_TYPES[type(event)], data, timestamp=timestamp)
+
+    def set_proactive_offer(self, request: ProactiveRequest | None) -> None:
+        """Publish the one desktop offer currently awaiting a user decision."""
+
+        self.proactive_offer = (
+            {
+                "id": request.id,
+                "title": request.title,
+                "available_at": request.available_at.isoformat(),
+                "state": request.state.value,
+            }
+            if request is not None
+            else None
+        )
+        self._publish(
+            "proactive.offer",
+            {"offer": copy.deepcopy(self.proactive_offer)},
+            timestamp=time.time(),
+        )
 
     def subscribe(self) -> asyncio.Queue[dict[str, Any]]:
         if self._client_queue is not None:
@@ -190,6 +239,7 @@ class RuntimeView:
             "input_level": self.input_level,
             "turns": copy.deepcopy(self.turns),
             "error": copy.deepcopy(self.error),
+            "proactive_offer": copy.deepcopy(self.proactive_offer),
         }
 
     def persisted_turns(self) -> list[dict[str, Any]]:
@@ -329,7 +379,11 @@ class RuntimeView:
             "session_id": event.session_id,
             "turn_id": event.turn_id,
             "source": event.source.value,
-            "user_text": event.text,
+            "user_text": (
+                ""
+                if event.source in {InputSource.PROACTIVE, InputSource.FOLLOWUP}
+                else event.text
+            ),
             "state": "started",
             "assistant": {
                 "parts": [],

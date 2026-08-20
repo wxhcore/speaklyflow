@@ -53,3 +53,40 @@ def test_bumblehive_api_key_is_required(config_data: dict[str, object]) -> None:
 
     with pytest.raises(ValueError, match="bumblehive.provider.api_key is required"):
         AppConfig.model_validate(config_data)
+
+
+def test_inactivity_policy_uses_one_optional_shape(
+    config_data: dict[str, object],
+) -> None:
+    assert AppConfig.model_validate(config_data).inactivity_policy is None
+
+    config_data["inactivity_policy"] = {
+        "timeout_seconds": 0.1,
+        "max_followups": 3,
+    }
+    policy = AppConfig.model_validate(config_data).inactivity_policy
+
+    assert policy is not None
+    assert policy.timeout_seconds == 0.1
+    assert policy.max_followups == 3
+    assert policy.on_exhausted == "wait"
+
+
+@pytest.mark.parametrize(
+    "inactivity_policy",
+    [
+        {"timeout_seconds": 0, "max_followups": 1},
+        {"timeout_seconds": 1, "max_followups": 0},
+        {"timeout_seconds": 1, "max_followups": 1.5},
+        {"timeout_seconds": 1, "max_followups": 1, "on_exhausted": "invalid"},
+        {"timeout_seconds": 1, "max_followups": 1, "enabled": True},
+    ],
+)
+def test_invalid_inactivity_policy_is_rejected(
+    config_data: dict[str, object],
+    inactivity_policy: dict[str, object],
+) -> None:
+    config_data["inactivity_policy"] = inactivity_policy
+
+    with pytest.raises(ValueError):
+        AppConfig.model_validate(config_data)

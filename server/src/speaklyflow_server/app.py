@@ -14,9 +14,12 @@ from pydantic import BaseModel, ConfigDict, Field, HttpUrl, ValidationError
 from .config import AppConfig
 from .protocol import (
     COMMAND_ADAPTER,
+    AnswerProactiveCommand,
+    DismissProactiveCommand,
     InterruptCommand,
     NewConversationCommand,
     RuntimeView,
+    SnoozeProactiveCommand,
     StartCommand,
     StopCommand,
     SubmitTextCommand,
@@ -53,10 +56,11 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         runtime = controller or RuntimeController(resolved_config_path)
         app.state.runtime = runtime
+        await runtime.start_background()
         try:
             yield
         finally:
-            await runtime.stop()
+            await runtime.close()
 
     app = FastAPI(title="SpeaklyFlow Server", version="0.1.0", lifespan=lifespan)
     app.add_middleware(
@@ -154,6 +158,9 @@ async def _execute_command(
         | InterruptCommand
         | SubmitTextCommand
         | NewConversationCommand
+        | AnswerProactiveCommand
+        | DismissProactiveCommand
+        | SnoozeProactiveCommand
     ),
 ) -> None:
     try:
@@ -169,6 +176,17 @@ async def _execute_command(
                 data = {"accepted": True}
             case NewConversationCommand():
                 data = {"conversation_id": await runtime.new_conversation()}
+            case AnswerProactiveCommand(request_id=request_id):
+                data = {"session_id": await runtime.answer_proactive(request_id)}
+            case DismissProactiveCommand(request_id=request_id):
+                await runtime.dismiss_proactive(request_id)
+                data = {"dismissed": True}
+            case SnoozeProactiveCommand(
+                request_id=request_id,
+                minutes=minutes,
+            ):
+                await runtime.snooze_proactive(request_id, minutes)
+                data = {"snoozed": True}
         view.send_command_result(command.id, ok=True, data=data)
     except CommandError as error:
         view.send_command_result(

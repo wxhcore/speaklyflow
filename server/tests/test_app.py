@@ -15,6 +15,13 @@ class StubController:
         self.stopped = False
         self.new_conversation_requested = False
         self.texts: list[str] = []
+        self.proactive_actions: list[tuple[object, ...]] = []
+
+    async def start_background(self) -> None:
+        pass
+
+    async def close(self) -> None:
+        await self.stop()
 
     def config_response(self) -> dict[str, object]:
         return {"config": None, "error": None}
@@ -35,6 +42,16 @@ class StubController:
     async def new_conversation(self) -> str:
         self.new_conversation_requested = True
         return "conversation-2"
+
+    async def answer_proactive(self, request_id: str) -> str:
+        self.proactive_actions.append(("answer", request_id))
+        return "session-1"
+
+    async def dismiss_proactive(self, request_id: str) -> None:
+        self.proactive_actions.append(("dismiss", request_id))
+
+    async def snooze_proactive(self, request_id: str, minutes: int) -> None:
+        self.proactive_actions.append(("snooze", request_id, minutes))
 
 
 def test_resolve_config_path() -> None:
@@ -93,6 +110,16 @@ def test_health_and_websocket_commands(tmp_path: Path) -> None:
             )
             assert websocket.receive_json()["ok"] is True
             assert controller.texts == ["hello"]
+            websocket.send_json(
+                {
+                    "id": "3",
+                    "type": "proactive.snooze",
+                    "request_id": "request-1",
+                    "minutes": 10,
+                }
+            )
+            assert websocket.receive_json()["ok"] is True
+            assert controller.proactive_actions == [("snooze", "request-1", 10)]
 
     assert controller.stopped is True
 

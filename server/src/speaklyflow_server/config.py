@@ -52,12 +52,19 @@ class VolcengineTTSConfig(_ConfigModel):
     settings: VolcengineTTSSettings
 
 
+class ConversationInactivityConfig(_ConfigModel):
+    timeout_seconds: float = Field(gt=0)
+    max_followups: int = Field(gt=0, strict=True)
+    on_exhausted: Literal["wait", "stop", "farewell"] = "wait"
+
+
 class AppConfig(_ConfigModel):
     audio: AudioConfig = Field(default_factory=AudioConfig)
     vad: VADConfig = Field(default_factory=VADConfig)
     asr: SenseVoiceASRConfig
     bumblehive: dict[str, Any]
     tts: VolcengineTTSConfig
+    inactivity_policy: ConversationInactivityConfig | None = None
 
     @field_validator("bumblehive")
     @classmethod
