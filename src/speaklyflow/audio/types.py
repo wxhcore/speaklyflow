@@ -29,7 +29,8 @@ class AudioFormat:
 
         if len(data) % self.frame_bytes:
             raise AudioFormatError(
-                f"PCM data length {len(data)} is not aligned to {self.frame_bytes} bytes per frame"
+                f"PCM data length {len(data)} is not aligned to "
+                f"{self.frame_bytes} bytes per frame"
             )
         return len(data) // self.frame_bytes
 

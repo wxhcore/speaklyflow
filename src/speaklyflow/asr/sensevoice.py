@@ -94,7 +94,8 @@ class SenseVoiceASR:
             self._ensure_started()
             if audio.format != self._input_format:
                 raise ASRFormatError(
-                    f"SenseVoiceASR requires {self._input_format!r}, received {audio.format!r}"
+                    f"SenseVoiceASR requires {self._input_format!r}, "
+                    f"received {audio.format!r}"
                 )
             if not audio.data:
                 return Transcript(text="")

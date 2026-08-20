@@ -99,7 +99,8 @@ class SileroVAD:
             self._ensure_started()
             if chunk.format != self._input_format:
                 raise VADFormatError(
-                    f"SileroVAD requires {self._input_format!r}, received {chunk.format!r}"
+                    f"SileroVAD requires {self._input_format!r}, "
+                    f"received {chunk.format!r}"
                 )
             if not chunk.data:
                 return self._state

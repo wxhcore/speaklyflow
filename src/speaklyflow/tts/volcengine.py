@@ -368,7 +368,11 @@ class VolcengineTTS:
                 close_timeout=5,
             )
             await start_connection(websocket)
-            await self._expect(websocket, EventType.ConnectionStarted, timeout=15)
+            await self._expect(
+                websocket,
+                EventType.ConnectionStarted,
+                timeout_seconds=15,
+            )
         except asyncio.CancelledError:
             if websocket is not None:
                 await websocket.close()
@@ -393,7 +397,7 @@ class VolcengineTTS:
                     message = await self._expect(
                         websocket,
                         EventType.SessionStarted,
-                        timeout=15,
+                        timeout_seconds=15,
                     )
                     if message.session_id and message.session_id != session_id:
                         raise TTSError("Volcengine TTS started an unexpected session")
@@ -461,7 +465,11 @@ class VolcengineTTS:
 
         with suppress(ConnectionClosed, OSError, TimeoutError, TTSError):
             await finish_connection(websocket)
-            await self._expect(websocket, EventType.ConnectionFinished, timeout=2)
+            await self._expect(
+                websocket,
+                EventType.ConnectionFinished,
+                timeout_seconds=2,
+            )
         with suppress(ConnectionClosed, OSError, TimeoutError):
             await websocket.close()
 
@@ -477,13 +485,17 @@ class VolcengineTTS:
         websocket: Any,
         event: EventType,
         *,
-        timeout: float,
+        timeout_seconds: float,
     ) -> Message:
-        message = await self._receive(websocket, timeout=timeout)
+        message = await self._receive(
+            websocket,
+            timeout_seconds=timeout_seconds,
+        )
         self._raise_for_error(message)
         if message.type != MsgType.FullServerResponse or message.event != event:
             raise TTSError(
-                f"Unexpected Volcengine TTS response: {message.type.name}/{message.event!s}; "
+                "Unexpected Volcengine TTS response: "
+                f"{message.type.name}/{message.event!s}; "
                 f"expected FullServerResponse/{event.name}"
             )
         return message
@@ -522,16 +534,20 @@ class VolcengineTTS:
     def _create_receive_task(self) -> asyncio.Task[Message]:
         websocket = self._require_websocket()
         return asyncio.create_task(
-            self._receive(websocket, timeout=_RESPONSE_TIMEOUT),
+            self._receive(websocket, timeout_seconds=_RESPONSE_TIMEOUT),
             name="volcengine-tts-audio",
         )
 
     @staticmethod
-    async def _receive(websocket: Any, *, timeout: float | None = None) -> Message:
+    async def _receive(
+        websocket: Any,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> Message:
         try:
-            if timeout is None:
+            if timeout_seconds is None:
                 return await receive_message(websocket)
-            async with asyncio.timeout(timeout):
+            async with asyncio.timeout(timeout_seconds):
                 return await receive_message(websocket)
         except asyncio.CancelledError:
             raise
