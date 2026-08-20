@@ -33,6 +33,22 @@ def test_invalid_config_is_not_silently_replaced(tmp_path: Path) -> None:
         load_config(path)
 
 
+def test_vad_input_level_gate_has_one_bounded_setting(
+    config_data: dict[str, object],
+) -> None:
+    config = AppConfig.model_validate(config_data)
+    assert config.vad.min_input_level == 0.0
+
+    vad = config_data["vad"]
+    assert isinstance(vad, dict)
+    vad["min_input_level"] = 0.2
+    assert AppConfig.model_validate(config_data).vad.min_input_level == 0.2
+
+    vad["min_input_level"] = 1.1
+    with pytest.raises(ValueError):
+        AppConfig.model_validate(config_data)
+
+
 def test_flat_provider_settings_are_rejected(config_data: dict[str, object]) -> None:
     asr = config_data["asr"]
     assert isinstance(asr, dict)

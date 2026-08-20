@@ -23,7 +23,8 @@ class AudioConfig(_ConfigModel):
 
 
 class VADConfig(_ConfigModel):
-    threshold: float = Field(default=0.5, ge=0, le=1)
+    threshold: float = Field(default=0.7, ge=0, le=1)
+    min_input_level: float = Field(default=0.0, ge=0, le=1)
     speech_start_ms: int = Field(default=200, gt=0)
     speech_end_ms: int = Field(default=400, gt=0)
 

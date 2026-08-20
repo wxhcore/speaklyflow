@@ -8,11 +8,11 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 import bumblehive
-import numpy as np
 
 from ..agent import BumblehiveAgent
 from ..asr import ASR, SpeechSegmenter
 from ..audio import AudioChunk, AudioError, AudioFormatError, AudioIO
+from ..audio._level import pcm16_rms_level
 from ..observability import (
     Component,
     ComponentEvent,
@@ -380,7 +380,7 @@ class VoiceSession:
                     self._emit(
                         InputLevelEvent(
                             session_id=self._session_id,
-                            level=_input_level(chunk),
+                            level=pcm16_rms_level(chunk.data),
                         )
                     )
                     next_level_at = now + _INPUT_LEVEL_INTERVAL_SECONDS
@@ -854,11 +854,3 @@ class VoiceSession:
 
 def _duration_ms(start: float, end: float) -> float:
     return round(max(end - start, 0) * 1_000, 1)
-
-
-def _input_level(chunk: AudioChunk) -> float:
-    samples = np.frombuffer(chunk.data, dtype="<i2")
-    if samples.size == 0:
-        return 0.0
-    rms = np.sqrt(np.mean(np.square(samples, dtype=np.float64)))
-    return min(float(rms / 32_768), 1.0)

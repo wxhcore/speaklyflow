@@ -101,6 +101,7 @@ def build_session(
         ),
         vad=SileroVAD(
             threshold=vad_config.threshold,
+            min_input_level=vad_config.min_input_level,
             speech_start_ms=vad_config.speech_start_ms,
             speech_end_ms=vad_config.speech_end_ms,
         ),
