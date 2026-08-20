@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import bumblehive
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .storage import load_json, save_json
 
@@ -64,8 +64,40 @@ class AppConfig(_ConfigModel):
     vad: VADConfig = Field(default_factory=VADConfig)
     asr: SenseVoiceASRConfig
     bumblehive: dict[str, Any]
+    personalization_enabled: bool = Field(default=False, strict=True)
     tts: VolcengineTTSConfig
     inactivity_policy: ConversationInactivityConfig | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_personalization(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+
+        normalized = dict(value)
+        bumblehive_config = normalized.get("bumblehive")
+        if not isinstance(bumblehive_config, dict):
+            return normalized
+        agent_config = bumblehive_config.get("agent")
+        if not isinstance(agent_config, dict):
+            agent_config = {}
+
+        if "personalization_enabled" not in normalized:
+            instructions = agent_config.get("instructions")
+            dynamic_context = agent_config.get("dynamic_context")
+            normalized["personalization_enabled"] = bool(
+                isinstance(instructions, str) and instructions.strip()
+            ) or bool(dynamic_context)
+
+        if normalized["personalization_enabled"] is False:
+            normalized_agent = dict(agent_config)
+            normalized_agent.pop("instructions", None)
+            normalized_agent.pop("dynamic_context", None)
+            normalized_bumblehive = dict(bumblehive_config)
+            normalized_bumblehive["agent"] = normalized_agent
+            normalized["bumblehive"] = normalized_bumblehive
+
+        return normalized
 
     @field_validator("bumblehive")
     @classmethod

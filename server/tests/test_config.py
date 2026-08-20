@@ -71,6 +71,55 @@ def test_bumblehive_api_key_is_required(config_data: dict[str, object]) -> None:
         AppConfig.model_validate(config_data)
 
 
+def test_legacy_agent_content_enables_personalization(
+    config_data: dict[str, object],
+) -> None:
+    config = AppConfig.model_validate(config_data)
+
+    assert config.personalization_enabled is True
+    assert config.bumblehive["agent"] == {"instructions": "Be concise."}
+
+
+def test_disabled_personalization_removes_agent_content(
+    config_data: dict[str, object],
+) -> None:
+    config_data["personalization_enabled"] = False
+    bumblehive = config_data["bumblehive"]
+    assert isinstance(bumblehive, dict)
+    bumblehive["agent"] = {
+        "instructions": "Do not save this.",
+        "dynamic_context": {"company": "Do not save this either."},
+        "tool_names": [],
+    }
+
+    config = AppConfig.model_validate(config_data)
+
+    assert config.personalization_enabled is False
+    assert config.bumblehive["agent"] == {"tool_names": []}
+
+
+@pytest.mark.asyncio
+async def test_disabled_personalization_content_is_not_saved(
+    tmp_path: Path,
+    config_data: dict[str, object],
+) -> None:
+    config_data["personalization_enabled"] = False
+    bumblehive = config_data["bumblehive"]
+    assert isinstance(bumblehive, dict)
+    bumblehive["agent"] = {
+        "instructions": "Do not persist this.",
+        "dynamic_context": {"company": "Do not persist this either."},
+    }
+    path = tmp_path / "config.json"
+
+    await save_config(path, AppConfig.model_validate(config_data))
+
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["personalization_enabled"] is False
+    assert "instructions" not in saved["bumblehive"]["agent"]
+    assert "dynamic_context" not in saved["bumblehive"]["agent"]
+
+
 def test_inactivity_policy_uses_one_optional_shape(
     config_data: dict[str, object],
 ) -> None:
