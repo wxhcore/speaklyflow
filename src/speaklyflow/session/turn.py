@@ -37,6 +37,7 @@ from ..observability import (
 )
 from ..observability._turn_tracker import _TurnMetricsTracker
 from ..tts import TTS, TextSegmenter, TTSResult, TTSStream, TTSTextMark
+from ..tts.text import MarkdownSpeechNormalizer
 
 _TEXT_EVENTS = (MODEL_STREAM_CONTENT_DELTA, MODEL_STREAM_REFUSAL_DELTA)
 _PLAYBACK_PROGRESS_INTERVAL_SECONDS = 0.02
@@ -528,33 +529,50 @@ class _TurnRunner:
             raise AudioError(f"Audio playback failed: {error}") from error
 
     async def _stream_tts_text(self) -> AsyncIterator[str]:
+        normalizer = MarkdownSpeechNormalizer()
         segmenter = TextSegmenter()
         response_index = 0
+
+        def ready_parts(
+            text: str,
+            index: int,
+            *,
+            finish: bool = False,
+        ) -> list[str]:
+            parts = segmenter.push(text) if text else []
+            if finish:
+                remaining = segmenter.flush()
+                if remaining:
+                    parts.append(remaining)
+            for part in parts:
+                self._record_first_tts_text()
+                self._playback.submit(index, part)
+            return parts
 
         while True:
             item = await self._tts_input.get()
             if item is None:
-                remaining = segmenter.flush()
-                if remaining:
-                    self._record_first_tts_text()
-                    self._playback.submit(response_index, remaining)
-                    yield remaining
+                for text in ready_parts(
+                    normalizer.flush(),
+                    response_index,
+                    finish=True,
+                ):
+                    yield text
                 return
 
             if isinstance(item, _TextDelta):
                 response_index = item.response_index
-                for text in segmenter.push(item.text):
-                    self._record_first_tts_text()
-                    self._playback.submit(response_index, text)
+                for text in ready_parts(normalizer.push(item.text), response_index):
                     yield text
                 continue
 
             if isinstance(item, _ResponseEnd):
-                remaining = segmenter.flush()
-                if remaining:
-                    self._record_first_tts_text()
-                    self._playback.submit(item.response_index, remaining)
-                    yield remaining
+                for text in ready_parts(
+                    normalizer.flush(),
+                    item.response_index,
+                    finish=True,
+                ):
+                    yield text
                 response_index = item.response_index + 1
 
     async def _complete(self) -> AgentRunResult:
