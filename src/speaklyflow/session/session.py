@@ -153,6 +153,7 @@ class VoiceSession:
         self._reported_errors: list[BaseException] = []
         self._accepting_inputs = False
         self._stop_after_turn = asyncio.Event()
+        self._stop_after_turn_owner: _TurnRunner | None = None
         self._stop_requested = False
         self._used = False
 
@@ -232,6 +233,7 @@ class VoiceSession:
     def request_stop_after_turn(self) -> None:
         """Finish the active turn, then close the voice session normally."""
 
+        self._stop_after_turn_owner = self._active_turn
         self._stop_after_turn.set()
 
     def submit_text(self, text: str) -> None:
@@ -655,6 +657,13 @@ class VoiceSession:
                     if outcome.failure is not None
                     else TurnState.COMPLETED
                 )
+
+            if (
+                state is not TurnState.COMPLETED
+                and self._stop_after_turn_owner is runner
+            ):
+                self._stop_after_turn_owner = None
+                self._stop_after_turn.clear()
 
             self._emit(
                 TurnEvent(
