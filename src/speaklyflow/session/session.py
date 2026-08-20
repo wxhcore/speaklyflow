@@ -5,6 +5,7 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
+from enum import StrEnum
 
 import bumblehive
 import numpy as np
@@ -40,6 +41,33 @@ _Close = Callable[[], Awaitable[None]]
 _INPUT_LEVEL_INTERVAL_SECONDS = 0.1
 
 
+def _proactive_prompt(instruction: str) -> str:
+    return (
+        "The user explicitly accepted a proactive conversation request. "
+        "Begin the conversation naturally and follow the instruction below. "
+        "Do not mention this internal request or its implementation details.\n\n"
+        "Instruction:\n"
+        f"{instruction}"
+    )
+
+
+def _followup_prompt(attempt: int, maximum: int) -> str:
+    return (
+        "The user has not responded during the current listening period. "
+        "Briefly ask them a natural, context-aware question to re-engage them. "
+        f"This is attempt {attempt} of {maximum}. "
+        "Do not mention the timer or attempt count."
+    )
+
+
+def _farewell_prompt() -> str:
+    return (
+        "The user has not responded after the final follow-up. "
+        "Briefly and naturally end the conversation without asking another question. "
+        "Do not mention timers, attempts, or internal instructions."
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _VoiceInput:
     audio: AudioChunk
@@ -50,10 +78,34 @@ class _VoiceInput:
 @dataclass(frozen=True, slots=True)
 class _TextInput:
     text: str
+    source: InputSource
     submitted_at: float
 
 
 _TurnInput = _VoiceInput | _TextInput
+
+
+class InactivityAction(StrEnum):
+    """Action after all inactivity follow-ups receive no response."""
+
+    WAIT = "wait"
+    STOP = "stop"
+    FAREWELL = "farewell"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ConversationInactivityPolicy:
+    """Behavior when a listening session receives no user input."""
+
+    timeout_seconds: float
+    max_followups: int
+    on_exhausted: InactivityAction = InactivityAction.WAIT
+
+    def __post_init__(self) -> None:
+        if self.timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be greater than zero")
+        if self.max_followups <= 0:
+            raise ValueError("max_followups must be greater than zero")
 
 
 class VoiceSession:
@@ -69,6 +121,7 @@ class VoiceSession:
         tts: TTS,
         history: bumblehive.MessageHistory | None = None,
         observers: Iterable[VoiceObserver] = (),
+        inactivity_policy: ConversationInactivityPolicy | None = None,
     ) -> None:
         """Store conversation components without starting external resources."""
 
@@ -86,16 +139,20 @@ class VoiceSession:
         self._history = history if history is not None else bumblehive.MessageHistory()
         self._session_id = uuid.uuid4().hex
         self._events = _EventDispatcher(observers)
+        self._inactivity_policy = inactivity_policy
 
         self._segmenter = SpeechSegmenter()
         self._inputs: asyncio.Queue[_TurnInput] = asyncio.Queue(maxsize=1)
+        self._speech_started = asyncio.Event()
         self._capture_task: asyncio.Task[None] | None = None
         self._active_turn: _TurnRunner | None = None
+        self._voice_inputs_in_progress = 0
         self._run_task: asyncio.Task[None] | None = None
         self._turn_id = 0
         self._started_closers: list[tuple[Component, _Close]] = []
         self._reported_errors: list[BaseException] = []
         self._accepting_inputs = False
+        self._stop_after_turn = asyncio.Event()
         self._stop_requested = False
         self._used = False
 
@@ -172,6 +229,11 @@ class VoiceSession:
             return False
         return turn.interrupt()
 
+    def request_stop_after_turn(self) -> None:
+        """Finish the active turn, then close the voice session normally."""
+
+        self._stop_after_turn.set()
+
     def submit_text(self, text: str) -> None:
         """Interrupt an active reply and queue one text input."""
 
@@ -183,60 +245,130 @@ class VoiceSession:
         if turn is not None:
             turn.interrupt()
 
-        item = _TextInput(text, time.perf_counter())
+        item = _TextInput(text, InputSource.TEXT, time.perf_counter())
         try:
             self._inputs.put_nowait(item)
         except asyncio.QueueFull:
             queued = self._inputs.get_nowait()
             if turn is not None and isinstance(queued, _VoiceInput):
+                self._voice_inputs_in_progress -= 1
                 self._inputs.put_nowait(item)
                 return
             self._inputs.put_nowait(queued)
             raise
 
+    def submit_proactive(self, instruction: str) -> None:
+        """Queue an agent-initiated turn only while the session is idle."""
+
+        if not self._accepting_inputs:
+            raise RuntimeError("VoiceSession is not ready")
+        if not instruction.strip():
+            raise ValueError("Proactive instruction must not be empty")
+        if (
+            self._voice_inputs_in_progress > 0
+            or self._active_turn is not None
+            or not self._inputs.empty()
+        ):
+            raise RuntimeError("VoiceSession is busy")
+
+        self._inputs.put_nowait(
+            _TextInput(
+                _proactive_prompt(instruction),
+                InputSource.PROACTIVE,
+                time.perf_counter(),
+            )
+        )
+
     async def _run_conversation(self) -> None:
-        while True:
-            turn_input = await self._next_input()
-            if isinstance(turn_input, _TextInput):
-                await self._run_turn(
-                    turn_input.text,
-                    source=InputSource.TEXT,
-                    prompt_ready_at=turn_input.submitted_at,
+        followups = 0
+        awaiting_user_response = False
+        while not self._stop_after_turn.is_set():
+            policy = self._inactivity_policy
+            exhausted = policy is not None and followups >= policy.max_followups
+            timeout = (
+                policy.timeout_seconds
+                if policy is not None
+                and awaiting_user_response
+                and not (exhausted and policy.on_exhausted is InactivityAction.WAIT)
+                else None
+            )
+            turn_input = await self._next_input(inactivity_seconds=timeout)
+            if self._stop_after_turn.is_set():
+                return
+            if turn_input is None:
+                assert policy is not None
+                if not exhausted:
+                    followups += 1
+                    await self._run_turn(
+                        _followup_prompt(followups, policy.max_followups),
+                        source=InputSource.FOLLOWUP,
+                        prompt_ready_at=time.perf_counter(),
+                    )
+                    continue
+                if policy.on_exhausted is InactivityAction.STOP:
+                    return
+                state = await self._run_turn(
+                    _farewell_prompt(),
+                    source=InputSource.FOLLOWUP,
+                    prompt_ready_at=time.perf_counter(),
                 )
+                if state is not TurnState.INTERRUPTED:
+                    return
                 continue
 
-            asr_started_at = time.perf_counter()
-            try:
-                transcript = await self._asr.transcribe(turn_input.audio)
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:  # noqa: BLE001 - provider failure is input-local
-                self._emit_error(
-                    component=Component.ASR,
-                    operation="transcribe",
-                    error=error,
-                    fatal=False,
+            if isinstance(turn_input, _TextInput):
+                followups = 0
+                awaiting_user_response = False
+                state = await self._run_turn(
+                    turn_input.text,
+                    source=turn_input.source,
+                    prompt_ready_at=turn_input.submitted_at,
                 )
+                awaiting_user_response = state is TurnState.COMPLETED
                 continue
-            asr_finished_at = time.perf_counter()
-            if transcript.text:
-                self._emit(
-                    TranscriptEvent(
-                        session_id=self._session_id,
-                        text=transcript.text,
-                        language=transcript.language,
+
+            resume_waiting_after_unrecognized_voice = awaiting_user_response
+            followups = 0
+            awaiting_user_response = False
+            try:
+                asr_started_at = time.perf_counter()
+                try:
+                    transcript = await self._asr.transcribe(turn_input.audio)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:  # noqa: BLE001 - provider failure is input-local
+                    self._emit_error(
+                        component=Component.ASR,
+                        operation="transcribe",
+                        error=error,
+                        fatal=False,
                     )
-                )
-                await self._run_turn(
-                    transcript.text,
-                    source=InputSource.VOICE,
-                    prompt_ready_at=asr_finished_at,
-                    speech_stopped_at=turn_input.speech_stopped_at,
-                    estimated_speech_ended_at=turn_input.estimated_speech_ended_at,
-                    asr_started_at=asr_started_at,
-                    asr_finished_at=asr_finished_at,
-                    asr_audio_seconds=turn_input.audio.duration_seconds,
-                )
+                    awaiting_user_response = resume_waiting_after_unrecognized_voice
+                    continue
+                asr_finished_at = time.perf_counter()
+                if transcript.text.strip():
+                    self._emit(
+                        TranscriptEvent(
+                            session_id=self._session_id,
+                            text=transcript.text,
+                            language=transcript.language,
+                        )
+                    )
+                    state = await self._run_turn(
+                        transcript.text,
+                        source=InputSource.VOICE,
+                        prompt_ready_at=asr_finished_at,
+                        speech_stopped_at=turn_input.speech_stopped_at,
+                        estimated_speech_ended_at=turn_input.estimated_speech_ended_at,
+                        asr_started_at=asr_started_at,
+                        asr_finished_at=asr_finished_at,
+                        asr_audio_seconds=turn_input.audio.duration_seconds,
+                    )
+                    awaiting_user_response = state is TurnState.COMPLETED
+                else:
+                    awaiting_user_response = resume_waiting_after_unrecognized_voice
+            finally:
+                self._voice_inputs_in_progress -= 1
 
     async def _capture(self) -> None:
         previous = VADState.SILENCE
@@ -266,6 +398,8 @@ class VoiceSession:
                     raise
 
                 if state is VADState.SPEAKING and previous is VADState.SILENCE:
+                    self._voice_inputs_in_progress += 1
+                    self._speech_started.set()
                     self._emit(
                         SpeechEvent(
                             session_id=self._session_id,
@@ -307,7 +441,11 @@ class VoiceSession:
         finally:
             self._emit(InputLevelEvent(session_id=self._session_id, level=0.0))
 
-    async def _next_input(self) -> _TurnInput:
+    async def _next_input(
+        self,
+        *,
+        inactivity_seconds: float | None = None,
+    ) -> _TurnInput | None:
         capture_task = self._capture_task
         if capture_task is None:
             raise RuntimeError("VoiceSession audio capture is not running")
@@ -316,19 +454,70 @@ class VoiceSession:
             self._inputs.get(),
             name="speaklyflow-next-input",
         )
+        stop_after_turn = asyncio.create_task(
+            self._stop_after_turn.wait(),
+            name="speaklyflow-wait-stop-after-turn",
+        )
+        speech_started = (
+            asyncio.create_task(
+                self._speech_started.wait(),
+                name="speaklyflow-wait-speech-start",
+            )
+            if inactivity_seconds is not None
+            else None
+        )
+        timer = (
+            asyncio.create_task(
+                asyncio.sleep(inactivity_seconds),
+                name="speaklyflow-inactivity-timeout",
+            )
+            if inactivity_seconds is not None
+            else None
+        )
         try:
+            pending = {receive, capture_task, stop_after_turn}
+            if speech_started is not None:
+                pending.add(speech_started)
+            if timer is not None:
+                pending.add(timer)
             done, _ = await asyncio.wait(
-                {receive, capture_task},
+                pending,
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if capture_task in done:
                 await capture_task
                 raise RuntimeError("Audio capture stopped unexpectedly")
-            return receive.result()
+            if stop_after_turn in done:
+                return None
+            if receive in done:
+                turn_input = receive.result()
+            elif speech_started is not None and speech_started in done:
+                done, _ = await asyncio.wait(
+                    {receive, capture_task, stop_after_turn},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if capture_task in done:
+                    await capture_task
+                    raise RuntimeError("Audio capture stopped unexpectedly")
+                if stop_after_turn in done:
+                    return None
+                turn_input = receive.result()
+            else:
+                return None
+
+            if isinstance(turn_input, _VoiceInput):
+                self._speech_started.clear()
+            return turn_input
         finally:
-            if not receive.done():
-                receive.cancel()
-                await asyncio.gather(receive, return_exceptions=True)
+            waiters = tuple(
+                waiter
+                for waiter in (receive, stop_after_turn, speech_started, timer)
+                if waiter is not None
+            )
+            for waiter in waiters:
+                if not waiter.done():
+                    waiter.cancel()
+            await asyncio.gather(*waiters, return_exceptions=True)
 
     async def _run_turn(
         self,
@@ -341,7 +530,7 @@ class VoiceSession:
         asr_started_at: float | None = None,
         asr_finished_at: float | None = None,
         asr_audio_seconds: float | None = None,
-    ) -> None:
+    ) -> TurnState:
         self._turn_id += 1
         turn_id = self._turn_id
         self._emit(
@@ -421,8 +610,8 @@ class VoiceSession:
                     turn_id=turn_id,
                 )
                 if failure.fatal:
-                    raise failure.error
-                return
+                    raise failure.error from failure
+                return TurnState.FAILED
             except AudioError as error:
                 self._emit(
                     TurnEvent(
@@ -491,6 +680,7 @@ class VoiceSession:
                 )
                 if outcome.failure.fatal:
                     raise outcome.failure.error
+            return state
         finally:
             if not task.done():
                 task.cancel()

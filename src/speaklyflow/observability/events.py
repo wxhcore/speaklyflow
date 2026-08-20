@@ -3,13 +3,13 @@
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from .metrics import TurnMetrics
 
 
-class Component(str, Enum):
+class Component(StrEnum):
     """Voice session component that produced an event."""
 
     SESSION = "session"
@@ -20,7 +20,7 @@ class Component(str, Enum):
     TTS = "tts"
 
 
-class SessionState(str, Enum):
+class SessionState(StrEnum):
     """Lifecycle state of a voice session."""
 
     STARTING = "starting"
@@ -29,7 +29,7 @@ class SessionState(str, Enum):
     STOPPED = "stopped"
 
 
-class ComponentState(str, Enum):
+class ComponentState(StrEnum):
     """Initialization state of a session component."""
 
     STARTING = "starting"
@@ -37,14 +37,14 @@ class ComponentState(str, Enum):
     FAILED = "failed"
 
 
-class SpeechState(str, Enum):
+class SpeechState(StrEnum):
     """Stable user speech transition reported by VAD."""
 
     STARTED = "started"
     STOPPED = "stopped"
 
 
-class TurnState(str, Enum):
+class TurnState(StrEnum):
     """State of one recognized user turn."""
 
     STARTED = "started"
@@ -53,14 +53,16 @@ class TurnState(str, Enum):
     FAILED = "failed"
 
 
-class InputSource(str, Enum):
+class InputSource(StrEnum):
     """Source that supplied one user turn."""
 
     VOICE = "voice"
     TEXT = "text"
+    PROACTIVE = "proactive"
+    FOLLOWUP = "followup"
 
 
-class SynthesisState(str, Enum):
+class SynthesisState(StrEnum):
     """State of assistant speech synthesis."""
 
     STARTED = "started"
@@ -70,7 +72,7 @@ class SynthesisState(str, Enum):
     FAILED = "failed"
 
 
-class PlaybackState(str, Enum):
+class PlaybackState(StrEnum):
     """State of assistant audio playback."""
 
     STARTED = "started"
